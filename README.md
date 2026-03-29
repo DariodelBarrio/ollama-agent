@@ -4,6 +4,8 @@ Agente autónomo de programación que corre **100% local** con [Ollama](https://
 
 ![Python](https://img.shields.io/badge/Python-3.9+-blue) ![Ollama](https://img.shields.io/badge/Ollama-latest-green) ![CUDA](https://img.shields.io/badge/CUDA-12.x-76B900) ![License](https://img.shields.io/badge/license-MIT-blue)
 
+![screenshot](docs/screenshot.png)
+
 ## Características
 
 - **100% offline** — tu código nunca sale de tu equipo
@@ -53,7 +55,7 @@ Agente autónomo de programación que corre **100% local** con [Ollama](https://
 
 ```bash
 # 1. Clonar repositorio
-git clone https://github.com/TU_USUARIO/ollama-agent.git
+git clone https://github.com/DariodelBarrio/ollama-agent.git
 cd ollama-agent
 
 # 2. Instalar dependencias
