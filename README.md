@@ -9,10 +9,11 @@ Agente autónomo de programación que corre **100% local** con [Ollama](https://
 - **100% offline** — tu código nunca sale de tu equipo
 - **Cero costos** — sin facturación por tokens
 - **10 herramientas** — archivos, shell, web, grep, más
-- **Modo agente** — encadena pasos sin interrumpir entre herramientas
+- **Modo agente** — encadena pasos sin interrumpir, nunca pide confirmación entre herramientas
+- **Autocorrección** — si falla, analiza el error y reintenta hasta 3 veces con enfoque diferente
 - **Streaming** — respuestas en tiempo real con Rich UI
 - **Multi-modelo** — soporte para 7 modelos Ollama
-- **GPU completa** — aceleración CUDA en modelos 7b/8b
+- **GPU completa** — 100% CUDA en modelos 7b/8b, 32K contexto, mirostat v2
 
 ## Modelos Disponibles
 
@@ -104,20 +105,40 @@ python src/agent.py --model hermes3:8b --tag "MI-AGENTE"
 
 ## Configuración GPU
 
-Variables de entorno para RTX 5070:
+Variables de entorno (ya configuradas en los `.bat` y con `setx`):
 
 ```bash
-set OLLAMA_NUM_GPU=999
-set OLLAMA_KEEP_ALIVE=-1
-set CUDA_VISIBLE_DEVICES=0
+set OLLAMA_NUM_GPU=999       # todas las capas en GPU
+set OLLAMA_KEEP_ALIVE=-1     # modelo siempre cargado en VRAM
+set CUDA_VISIBLE_DEVICES=0   # GPU primaria
 ```
 
 Para configurarlas permanentemente en Windows:
 
 ```powershell
-[System.Environment]::SetEnvironmentVariable('OLLAMA_NUM_GPU', '999', 'User')
-[System.Environment]::SetEnvironmentVariable('OLLAMA_KEEP_ALIVE', '-1', 'User')
+setx OLLAMA_NUM_GPU 999
+setx OLLAMA_KEEP_ALIVE -1
+setx CUDA_VISIBLE_DEVICES 0
 ```
+
+Verificar que funciona:
+
+```bash
+ollama ps   # columna PROCESSOR debe mostrar 100% GPU (modelos 7b/8b)
+```
+
+## Parámetros de Modelo
+
+Configuración optimizada para máxima inteligencia y precisión:
+
+| Parámetro | Valor | Efecto |
+|-----------|-------|--------|
+| `mirostat` | 2 | Muestreo adaptativo — coherencia superior a top_p fijo |
+| `mirostat_tau` | 5.0 | Entropía objetivo equilibrada para código |
+| `temperature` | 0.15 | Preciso sin ser robótico |
+| `num_ctx` | 32768 | Ventana de 32K tokens — proyectos grandes |
+| `num_predict` | -1 | Sin límite de generación |
+| `repeat_penalty` | 1.05 | Evita repeticiones sin cortar creatividad |
 
 ## Contexto de Proyecto
 

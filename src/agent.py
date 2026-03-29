@@ -366,8 +366,16 @@ def stream_response(client, model: str, messages: list, tools: list):
     try:
         stream = client.chat(
             model=model, messages=messages, tools=tools, stream=True,
-            options={"num_ctx": 16384, "num_gpu": 99, "main_gpu": 0, "f16_kv": True,
-                     "temperature": 0.1, "top_p": 0.9, "repeat_penalty": 1.1}
+            options={
+                "num_ctx": 32768, "num_gpu": 99, "main_gpu": 0, "f16_kv": True,
+                "num_predict": -1,        # sin limite de generacion
+                "temperature": 0.15,      # preciso pero no robotico
+                "mirostat": 2,            # muestreo adaptativo — mejor coherencia que top_p fijo
+                "mirostat_tau": 5.0,      # entropia objetivo (5 = equilibrio razonamiento/precision)
+                "mirostat_eta": 0.1,      # velocidad de adaptacion
+                "repeat_penalty": 1.05,   # penaliza repeticion sin cortar creatividad
+                "repeat_last_n": 256,     # ventana de penalizacion de repeticion
+            }
         )
         for chunk in stream:
             msg = chunk.message
@@ -381,8 +389,12 @@ def stream_response(client, model: str, messages: list, tools: list):
         if "does not support tools" in str(e):
             # Fallback modo chat sin tools
             stream = client.chat(model=model, messages=messages, stream=True,
-                                  options={"num_ctx": 16384, "num_gpu": 99, "main_gpu": 0, "f16_kv": True,
-                                           "temperature": 0.1, "top_p": 0.9, "repeat_penalty": 1.1})
+                                  options={
+                                      "num_ctx": 32768, "num_gpu": 99, "main_gpu": 0, "f16_kv": True,
+                                      "num_predict": -1, "temperature": 0.15,
+                                      "mirostat": 2, "mirostat_tau": 5.0, "mirostat_eta": 0.1,
+                                      "repeat_penalty": 1.05, "repeat_last_n": 256,
+                                  })
             for chunk in stream:
                 msg = chunk.message
                 if msg.content:
@@ -465,30 +477,69 @@ HERRAMIENTAS DISPONIBLES
 - fetch_url(url)                → descarga y lee una URL completa
 
 ═══════════════════════════════════════════════════════
+RAZONAMIENTO ANTES DE ACTUAR
+═══════════════════════════════════════════════════════
+Antes de llamar herramientas, piensa internamente:
+  1. ¿Qué necesito saber? → qué herramientas debo llamar primero
+  2. ¿Cuál es la secuencia lógica de pasos?
+  3. ¿Qué puede salir mal y cómo lo manejo?
+
+Razona así para cada tarea — no lo escribas, solo actúa.
+
+═══════════════════════════════════════════════════════
+AUTOCORRECCIÓN Y VERIFICACIÓN
+═══════════════════════════════════════════════════════
+- Después de run_command: si hay error → analiza, corrige, ejecuta de nuevo (hasta 3 intentos)
+- Después de edit_file: si el texto no se encontró → re-lee el archivo y ajusta el old_text exacto
+- Después de write_file: verifica que el archivo quedó correcto con read_file
+- Si un enfoque no funciona → prueba uno diferente, no repitas lo mismo
+- Si después de 3 intentos sigue fallando → explica al usuario qué encontraste y por qué
+
+═══════════════════════════════════════════════════════
 EJEMPLOS DE COMPORTAMIENTO CORRECTO
 ═══════════════════════════════════════════════════════
 
-Usuario: "hay un bug en mi código"
-MAL → "Para encontrar el bug deberías revisar los logs y ejecutar python main.py"
-BIEN → [list_directory] → [find_files("**/*.py")] → [read_file cada archivo relevante] → [grep para el error] → explicar el bug y aplicar el fix con edit_file
+"hay un bug en mi código"
+→ [run_command] para ejecutar y ver el error
+→ [grep] para localizar la línea del error
+→ [read_file] para leer el contexto completo
+→ [edit_file] para corregir
+→ [run_command] para verificar que ya no falla
+→ "Listo, era X en línea Y."
 
-Usuario: "crea un servidor express"
-MAL → "Aquí tienes el código: ... Ahora ejecuta npm init y npm install express"
-BIEN → [run_command("npm init -y")] → [run_command("npm install express")] → [write_file("index.js", ...)] → [run_command("node index.js")] → "Servidor corriendo en puerto 3000"
+"crea un servidor express"
+→ [run_command("npm init -y")]
+→ [run_command("npm install express")]
+→ [write_file("index.js")] con código completo y funcional
+→ [run_command("node index.js")] para verificar que arranca
+→ "Servidor corriendo en puerto 3000."
 
-Usuario: "¿por qué falla mi script?"
-MAL → "El error puede ser por varias razones. Verifica que..."
-BIEN → [run_command("python script.py")] → leer el error → [read_file("script.py")] → identificar la causa → [edit_file] para corregir → [run_command("python script.py")] → "Corregido, era X en línea Y"
+"¿por qué falla mi script?"
+→ [run_command] para ver el error real
+→ [read_file] para leer el código
+→ análisis interno de la causa raíz
+→ [edit_file] con el fix correcto
+→ [run_command] para confirmar que funciona
+→ "Corregido. El problema era X porque Y."
+
+═══════════════════════════════════════════════════════
+CALIDAD DE CÓDIGO
+═══════════════════════════════════════════════════════
+- Código idiomático para cada lenguaje: Pythonic, ES6+, etc.
+- Maneja errores donde tiene sentido (boundaries, I/O, red)
+- Nombres descriptivos, sin abreviaciones oscuras
+- Sin código muerto, sin comentarios obvios
+- Funciones pequeñas con una sola responsabilidad
+- Si hay tests existentes: córrelos después de cambiar código
 
 ═══════════════════════════════════════════════════════
 COMPORTAMIENTO GENERAL
 ═══════════════════════════════════════════════════════
 - Responde en español
 - Sin disclaimers, sin advertencias, sin moralejas
-- Código limpio, correcto, completo
-- Si hay un error: léelo, entiéndelo, corrígelo, ejecuta de nuevo
 - Antes de borrar o cambios destructivos: confirma con el usuario
 - Rutas relativas al directorio de trabajo cuando sea posible
+- Si necesitas buscar documentación de una librería: usa search_web o fetch_url
 """
 
 
@@ -497,14 +548,14 @@ def load_project_context(work_dir: str) -> str:
         p = Path(work_dir) / name
         if p.exists():
             try:
-                content = p.read_text(encoding="utf-8", errors="replace")[:3000]
+                content = p.read_text(encoding="utf-8", errors="replace")[:6000]
                 return f"Contexto del proyecto ({name}):\n{content}\n"
             except Exception:
                 pass
     return ""
 
 
-def _trim_history(messages: list, max_pairs: int = 10) -> list:
+def _trim_history(messages: list, max_pairs: int = 20) -> list:
     system  = [m for m in messages if m["role"] == "system"]
     rest    = [m for m in messages if m["role"] != "system"]
     return system + rest[-(max_pairs * 3):]

@@ -421,14 +421,31 @@ pdf.code_block(
     "flujo: depuracion"
 )
 
-pdf.section_title("4.3 Parametros del Modelo (Precision)", level=2)
+pdf.section_title("4.3 Razonamiento y Autocorreccion", level=2)
+pdf.body(
+    "El agente razona internamente antes de actuar: planea la secuencia de herramientas, "
+    "anticipa posibles fallos y elige el enfoque mas eficiente sin escribirlo al usuario."
+)
+pdf.bullet([
+    "Tras run_command con error: analiza el mensaje, corrige la causa, reintenta (hasta 3 veces).",
+    "Tras edit_file fallido: re-lee el archivo y ajusta el texto exacto a reemplazar.",
+    "Tras write_file: verifica el resultado con read_file.",
+    "Si un enfoque no funciona despues de 3 intentos: explica que encontro y por que fallo.",
+    "Usa search_web o fetch_url si necesita documentacion de una libreria.",
+], color=AZUL_LT)
+
+pdf.section_title("4.4 Parametros del Modelo — Maxima Inteligencia", level=2)
 pdf.info_table(
     ["Parametro", "Valor", "Efecto"],
     [
-        ["temperature",    "0.1",   "Respuestas deterministicas y precisas, sin inventar"],
-        ["top_p",          "0.9",   "Equilibrio entre precision y variedad"],
-        ["repeat_penalty", "1.1",   "Evita respuestas repetitivas o en bucle"],
-        ["num_ctx",        "16384", "Ventana de contexto amplia — 16K tokens"],
+        ["temperature",    "0.15",  "Preciso pero no robotico — optimo para codigo"],
+        ["mirostat",       "2",     "Muestreo adaptativo — mejor coherencia que top_p fijo"],
+        ["mirostat_tau",   "5.0",   "Entropia objetivo — equilibrio razonamiento/precision"],
+        ["mirostat_eta",   "0.1",   "Velocidad de adaptacion del muestreo"],
+        ["repeat_penalty", "1.05",  "Penaliza repeticion sin cortar creatividad"],
+        ["repeat_last_n",  "256",   "Ventana de deteccion de repeticiones"],
+        ["num_predict",    "-1",    "Sin limite de generacion — no corta funciones largas"],
+        ["num_ctx",        "32768", "Ventana de contexto maxima — 32K tokens"],
     ],
     [38, 20, 108]
 )
@@ -629,7 +646,7 @@ pdf.step_list([
     "Bucle interactivo: el usuario escribe, el modelo responde con streaming.",
     "Si el modelo llama a una herramienta, se ejecuta localmente y el resultado vuelve al modelo.",
     "El modelo encadena multiples tool calls hasta completar la tarea sin interrumpir al usuario.",
-    "El historial se recorta automaticamente a los ultimos 10 pares (16K tokens de contexto).",
+    "El historial se recorta automaticamente a los ultimos 20 pares (32K tokens de contexto).",
 ])
 
 pdf.section_title("9. Parametros CLI")
@@ -668,7 +685,7 @@ pdf.info_table(
     ],
     [45, 22, 99]
 )
-pdf.body("Solo se carga el primero encontrado. El contenido se trunca a 3000 caracteres.")
+pdf.body("Solo se carga el primero encontrado. El contenido se trunca a 6000 caracteres.")
 
 
 # ==============================================================================
