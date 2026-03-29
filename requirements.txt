@@ -1,0 +1,6 @@
+ollama
+rich
+duckduckgo-search
+requests
+beautifulsoup4
+fpdf2
