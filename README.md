@@ -6,7 +6,7 @@ Agente autónomo de programación que corre **100% local** con [Ollama](https://
 
 ![screenshot](docs/screenshot.png)
 
-> Desarrollado con asistencia de [Claude Sonnet 4.6](https://claude.ai) (Anthropic)
+
 
 ## Características
 
