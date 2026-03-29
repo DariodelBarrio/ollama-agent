@@ -5,5 +5,5 @@ set OLLAMA_NUM_GPU=999
 set CUDA_VISIBLE_DEVICES=0
 title Agente Local GROQ - llama3-groq-tool-use:8b
 cls
-python "%~dp0..\..\src\agent.py" --model llama3-groq-tool-use:8b --dir "%CD%" --tag GROQ
+python "%~dp0..\..\src\agent.py" --model llama3-groq-tool-use:8b --dir "%CD%" --tag GROQ --ctx 32768
 pause

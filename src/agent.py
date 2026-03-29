@@ -1,12 +1,13 @@
 """
 Agente de programacion local con Ollama - UI estilo Claude Code
-Uso: python src/agent.py [--model qwen2.5-coder:14b] [--dir C:\\mi\\proyecto]
+Uso: python src/agent.py [--model qwen2.5-coder:14b] [--dir C:\\mi\\proyecto] [--ctx 16384] [--temp 0.15]
 """
 import json
 import subprocess
 import os
 import sys
 import re
+import shutil
 import argparse
 from pathlib import Path
 
@@ -27,7 +28,6 @@ except ImportError:
 try:
     from rich.console import Console
     from rich.text import Text
-    from rich.live import Live
     from rich.padding import Padding
     from rich.columns import Columns
     from rich.rule import Rule
@@ -50,9 +50,10 @@ C_LOGO     = "#E8643B"      # naranja Claude
 C_LOGO2    = "#C0391B"      # naranja oscuro
 C_BORDER   = "#30363D"      # borde sutil
 C_TEXT     = "#D4D4D4"      # texto principal
-C_CMD      = "#DCDCAA"      # amarillo para comandos
 
-WORK_DIR = "."
+WORK_DIR     = "."
+_NUM_CTX     = 16384   # 16K cabe en VRAM con modelos 14b en GPU de 12GB
+_TEMPERATURE = 0.15
 
 # ─── Herramientas ─────────────────────────────────────────────────────────────
 
@@ -117,7 +118,8 @@ def find_files(pattern: str, path: str = ".") -> dict:
     try:
         p = _resolve(path)
         matches = sorted(p.glob(pattern))
-        return {"pattern": pattern, "path": str(p), "files": [str(f.relative_to(p)) for f in matches if f.is_file()][:50]}
+        return {"pattern": pattern, "path": str(p),
+                "files": [str(f.relative_to(p)) for f in matches if f.is_file()][:50]}
     except Exception as e:
         return {"error": str(e)}
 
@@ -168,14 +170,38 @@ def delete_file(path: str) -> dict:
         p = _resolve(path)
         if not p.exists():
             return {"error": f"No existe: {path}"}
-        p.rmdir() if p.is_dir() else p.unlink()
+        if p.is_dir():
+            shutil.rmtree(p)
+        else:
+            p.unlink()
         return {"success": True, "deleted": str(p)}
     except Exception as e:
         return {"error": str(e)}
 
 
+def create_directory(path: str) -> dict:
+    try:
+        p = _resolve(path)
+        p.mkdir(parents=True, exist_ok=True)
+        return {"success": True, "path": str(p)}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def move_file(src: str, dst: str) -> dict:
+    try:
+        s = _resolve(src)
+        d = _resolve(dst)
+        if not s.exists():
+            return {"error": f"No existe: {src}"}
+        d.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(s), str(d))
+        return {"success": True, "from": str(s), "to": str(d)}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 def search_web(query: str, max_results: int = 5) -> dict:
-    """Busca en internet con DuckDuckGo y devuelve los mejores resultados."""
     if not WEB_AVAILABLE:
         return {"error": "Instala: pip install duckduckgo-search requests beautifulsoup4"}
     try:
@@ -192,7 +218,6 @@ def search_web(query: str, max_results: int = 5) -> dict:
 
 
 def fetch_url(url: str, max_chars: int = 4000) -> dict:
-    """Descarga y extrae el texto limpio de una URL."""
     if not WEB_AVAILABLE:
         return {"error": "Instala: pip install requests beautifulsoup4"}
     try:
@@ -216,29 +241,65 @@ def _resolve(path: str) -> Path:
 
 
 TOOL_MAP = {
-    "run_command": run_command, "read_file": read_file, "write_file": write_file,
-    "edit_file": edit_file, "find_files": find_files, "grep": grep,
-    "list_directory": list_directory, "delete_file": delete_file,
-    "search_web": search_web, "fetch_url": fetch_url,
+    "run_command":      run_command,
+    "read_file":        read_file,
+    "write_file":       write_file,
+    "edit_file":        edit_file,
+    "find_files":       find_files,
+    "grep":             grep,
+    "list_directory":   list_directory,
+    "delete_file":      delete_file,
+    "create_directory": create_directory,
+    "move_file":        move_file,
+    "search_web":       search_web,
+    "fetch_url":        fetch_url,
 }
 
-TOOLS = [
-    {"type": "function", "function": {"name": "run_command", "description": "Ejecuta comandos PowerShell o CMD.",
-      "parameters": {"type": "object", "properties": {"command": {"type": "string"}, "shell": {"type": "string", "enum": ["powershell", "cmd"]}, "timeout": {"type": "integer"}}, "required": ["command"]}}},
-    {"type": "function", "function": {"name": "read_file", "description": "Lee un archivo con números de línea.",
+_BASE_TOOLS = [
+    {"type": "function", "function": {"name": "run_command",
+      "description": "Ejecuta comandos PowerShell o CMD.",
+      "parameters": {"type": "object", "properties": {
+          "command": {"type": "string"}, "shell": {"type": "string", "enum": ["powershell", "cmd"]},
+          "timeout": {"type": "integer"}}, "required": ["command"]}}},
+    {"type": "function", "function": {"name": "read_file",
+      "description": "Lee un archivo con números de línea.",
       "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}},
-    {"type": "function", "function": {"name": "write_file", "description": "Crea un archivo nuevo.",
-      "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}},
-    {"type": "function", "function": {"name": "edit_file", "description": "Edita texto exacto en un archivo existente.",
-      "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}}},
-    {"type": "function", "function": {"name": "find_files", "description": "Busca archivos por patrón glob.",
-      "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}, "path": {"type": "string"}}, "required": ["pattern"]}}},
-    {"type": "function", "function": {"name": "grep", "description": "Busca texto/regex en el proyecto.",
-      "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}, "path": {"type": "string"}, "extension": {"type": "string"}}, "required": ["pattern"]}}},
-    {"type": "function", "function": {"name": "list_directory", "description": "Lista carpetas.",
+    {"type": "function", "function": {"name": "write_file",
+      "description": "Crea un archivo nuevo.",
+      "parameters": {"type": "object", "properties": {
+          "path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}},
+    {"type": "function", "function": {"name": "edit_file",
+      "description": "Edita texto exacto en un archivo existente.",
+      "parameters": {"type": "object", "properties": {
+          "path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}},
+          "required": ["path", "old_text", "new_text"]}}},
+    {"type": "function", "function": {"name": "find_files",
+      "description": "Busca archivos por patrón glob.",
+      "parameters": {"type": "object", "properties": {
+          "pattern": {"type": "string"}, "path": {"type": "string"}}, "required": ["pattern"]}}},
+    {"type": "function", "function": {"name": "grep",
+      "description": "Busca texto/regex en el proyecto.",
+      "parameters": {"type": "object", "properties": {
+          "pattern": {"type": "string"}, "path": {"type": "string"}, "extension": {"type": "string"}},
+          "required": ["pattern"]}}},
+    {"type": "function", "function": {"name": "list_directory",
+      "description": "Lista carpetas.",
       "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": []}}},
-    {"type": "function", "function": {"name": "delete_file", "description": "Elimina un archivo.",
+    {"type": "function", "function": {"name": "delete_file",
+      "description": "Elimina un archivo o carpeta (recursivo para carpetas no vacías).",
       "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}},
+    {"type": "function", "function": {"name": "create_directory",
+      "description": "Crea una carpeta y subcarpetas si es necesario.",
+      "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}},
+    {"type": "function", "function": {"name": "move_file",
+      "description": "Mueve o renombra un archivo o carpeta.",
+      "parameters": {"type": "object", "properties": {
+          "src": {"type": "string", "description": "Ruta origen"},
+          "dst": {"type": "string", "description": "Ruta destino"}},
+          "required": ["src", "dst"]}}},
+]
+
+_WEB_TOOLS = [
     {"type": "function", "function": {"name": "search_web",
       "description": "Busca en internet con DuckDuckGo. Usa esto para noticias, documentacion, precios, cualquier info actual.",
       "parameters": {"type": "object", "properties": {
@@ -246,12 +307,14 @@ TOOLS = [
           "max_results": {"type": "integer", "description": "Numero de resultados (default 5)"}
       }, "required": ["query"]}}},
     {"type": "function", "function": {"name": "fetch_url",
-      "description": "Descarga y lee el contenido de una URL. Usa esto para leer documentacion, articulos o paginas web completas.",
+      "description": "Descarga y lee el contenido de una URL. Usa esto para leer documentacion, articulos o paginas web.",
       "parameters": {"type": "object", "properties": {
           "url":       {"type": "string",  "description": "URL a leer"},
           "max_chars": {"type": "integer", "description": "Maximo de caracteres a devolver (default 4000)"}
       }, "required": ["url"]}}},
-]
+] if WEB_AVAILABLE else []
+
+TOOLS = _BASE_TOOLS + _WEB_TOOLS
 
 
 # ─── UI ───────────────────────────────────────────────────────────────────────
@@ -266,23 +329,20 @@ LOGO_LINES = [
 
 def print_header(model: str, work_dir: str, tag: str):
     console.print()
-    # Logo + info en columnas
     logo_text = Text.from_markup("\n".join(LOGO_LINES))
 
-    # Nombre del agente y modelo
     info = Text()
-    info.append(f"  {tag}", style=f"bold white")
+    info.append(f"  {tag}", style="bold white")
     info.append("  ~  ", style=C_DIM)
     info.append(model, style=C_LOGO)
     info.append("\n")
     internet = "internet · " if WEB_AVAILABLE else ""
     info.append(f"  sin restricciones · {internet}herramientas · streaming", style=C_DIM)
     info.append("\n")
-    info.append(f"  {work_dir}", style=C_DIM)
+    info.append(f"  ctx:{_NUM_CTX}  temp:{_TEMPERATURE}  {work_dir}", style=C_DIM)
     info.append("\n\n")
     info.append("  'salir' para terminar  ·  'limpiar' nueva sesión", style=C_DIM)
 
-    # Imprimir lado a lado
     console.print(Padding(Columns([logo_text, info], padding=(0, 2)), (1, 2)))
     console.print(Rule(style=C_BORDER))
     console.print()
@@ -313,14 +373,29 @@ def print_tool_result(result: dict):
         rc  = result.get("returncode", 0)
         t.append("  ✓ ", style=C_OK)
         if out:
-            t.append(out[:300] + ("…" if len(out) > 300 else ""), style=C_TEXT)
+            t.append(out[:1000] + ("…" if len(out) > 1000 else ""), style=C_TEXT)
         if err:
-            t.append(f"\n    stderr: {err[:150]}", style=C_ERR)
+            t.append(f"\n    stderr: {err[:300]}", style=C_ERR)
         if rc != 0:
             t.append(f"  [rc={rc}]", style=C_ERR)
+    elif "content" in result and "url" in result:
+        # fetch_url
+        t.append("  ✓ ", style=C_OK)
+        t.append(f"{result.get('chars', 0)} chars  ·  {result['url'][:60]}", style=C_DIM)
     elif "content" in result:
+        # read_file
         t.append("  ✓ ", style=C_OK)
         t.append(f"{result['lines']} líneas  ·  {result['path']}", style=C_DIM)
+    elif "query" in result and "results" in result:
+        # search_web
+        t.append("  ✓ ", style=C_OK)
+        items = result["results"]
+        t.append(f"{len(items)} resultados para: {result['query']}\n", style=C_DIM)
+        for r in items[:3]:
+            t.append(f"    · {r.get('title', '')[:70]}\n", style=C_TEXT)
+            snippet = r.get("snippet", "")[:100]
+            if snippet:
+                t.append(f"      {snippet}…\n", style=C_DIM)
     elif "files" in result:
         t.append("  ✓ ", style=C_OK)
         t.append(f"{len(result['files'])} archivos encontrados", style=C_DIM)
@@ -329,13 +404,8 @@ def print_tool_result(result: dict):
         t.append(f"{len(result['results'])} coincidencias", style=C_DIM)
     elif "success" in result:
         t.append("  ✓ ", style=C_OK)
-        t.append(result.get("path", result.get("deleted", "ok")), style=C_DIM)
-    elif "results" in result and "query" in result:
-        t.append("  ✓ ", style=C_OK)
-        t.append(f"{len(result['results'])} resultados para: {result['query']}", style=C_DIM)
-    elif "content" in result and "url" in result:
-        t.append("  ✓ ", style=C_OK)
-        t.append(f"{result.get('chars', 0)} chars leídos de {result['url'][:60]}", style=C_DIM)
+        detail = result.get("to") or result.get("path") or result.get("deleted") or "ok"
+        t.append(detail, style=C_DIM)
     else:
         t.append("  ✓ ", style=C_OK)
         t.append("ok", style=C_DIM)
@@ -343,40 +413,40 @@ def print_tool_result(result: dict):
 
 
 def get_input(model_short: str) -> str:
-    """Prompt estilo Claude Code con > y status a la derecha."""
-    # Línea de input con prompt coloreado
     console.print()
     try:
-        # Prompt con > en azul
         console.print(f"[{C_PROMPT}]>[/] ", end="")
-        user = input()
-        return user.strip()
+        return input().strip()
     except (KeyboardInterrupt, EOFError):
         return "salir"
 
 
-def stream_response(client, model: str, messages: list, tools: list):
-    """Hace streaming de la respuesta y devuelve (content, tool_calls)."""
-    collected = []
-    tool_calls = []
+def _build_options() -> dict:
+    return {
+        "num_ctx":        _NUM_CTX,
+        "num_batch":      512,       # tokens procesados por batch en GPU — mejora ocupacion
+        "num_gpu":        99,
+        "main_gpu":       0,
+        "f16_kv":         True,
+        "num_predict":    -1,
+        "temperature":    _TEMPERATURE,
+        "mirostat":       2,
+        "mirostat_tau":   5.0,
+        "mirostat_eta":   0.1,
+        "repeat_penalty": 1.05,
+        "repeat_last_n":  256,
+    }
 
-    # Bullet de respuesta
+
+def stream_response(client, model: str, messages: list, tools: list):
+    collected  = []
+    tool_calls = []
+    options    = _build_options()
+
     console.print(f"\n[{C_BULLET}]●[/] ", end="")
 
     try:
-        stream = client.chat(
-            model=model, messages=messages, tools=tools, stream=True,
-            options={
-                "num_ctx": 32768, "num_gpu": 99, "main_gpu": 0, "f16_kv": True,
-                "num_predict": -1,        # sin limite de generacion
-                "temperature": 0.15,      # preciso pero no robotico
-                "mirostat": 2,            # muestreo adaptativo — mejor coherencia que top_p fijo
-                "mirostat_tau": 5.0,      # entropia objetivo (5 = equilibrio razonamiento/precision)
-                "mirostat_eta": 0.1,      # velocidad de adaptacion
-                "repeat_penalty": 1.05,   # penaliza repeticion sin cortar creatividad
-                "repeat_last_n": 256,     # ventana de penalizacion de repeticion
-            }
-        )
+        stream = client.chat(model=model, messages=messages, tools=tools, stream=True, options=options)
         for chunk in stream:
             msg = chunk.message
             if msg.tool_calls:
@@ -387,14 +457,7 @@ def stream_response(client, model: str, messages: list, tools: list):
 
     except Exception as e:
         if "does not support tools" in str(e):
-            # Fallback modo chat sin tools
-            stream = client.chat(model=model, messages=messages, stream=True,
-                                  options={
-                                      "num_ctx": 32768, "num_gpu": 99, "main_gpu": 0, "f16_kv": True,
-                                      "num_predict": -1, "temperature": 0.15,
-                                      "mirostat": 2, "mirostat_tau": 5.0, "mirostat_eta": 0.1,
-                                      "repeat_penalty": 1.05, "repeat_last_n": 256,
-                                  })
+            stream = client.chat(model=model, messages=messages, stream=True, options=options)
             for chunk in stream:
                 msg = chunk.message
                 if msg.content:
@@ -404,7 +467,7 @@ def stream_response(client, model: str, messages: list, tools: list):
             console.print(f"\n[{C_ERR}]Error: {e}[/]")
 
     if not tool_calls:
-        console.print()  # newline final
+        console.print()
 
     return "".join(collected), tool_calls
 
@@ -412,7 +475,10 @@ def stream_response(client, model: str, messages: list, tools: list):
 # ─── Prompts ──────────────────────────────────────────────────────────────────
 
 def build_system_prompt(work_dir: str, project_context: str) -> str:
-    return f"""Eres un agente autónomo de programación. Directorio de trabajo: {work_dir}
+    desktop = str(Path.home() / "Desktop")
+    return f"""/no_think
+Eres un agente autónomo de programación. Directorio de trabajo: {work_dir}
+Escritorio del usuario: {desktop}
 
 {project_context}
 
@@ -463,18 +529,46 @@ Si no conoces la estructura del proyecto, usa list_directory() primero.
 Si no sabes qué contiene un archivo, léelo con read_file().
 
 ═══════════════════════════════════════════════════════
+REGLA ABSOLUTA #4 — CREAR ARCHIVOS = USAR write_file()
+═══════════════════════════════════════════════════════
+Cuando el usuario pide "hazme un script / crea un archivo / escribe un programa":
+  → USA write_file(path, content) para crearlo en la ruta indicada
+  → NUNCA muestres el código en el chat como respuesta
+  → NUNCA digas "no puedo crear archivos" — TIENES write_file(), ÚSALO
+
+Rutas especiales:
+  "en el escritorio"   → {desktop}\\nombre_archivo.py
+  "aquí" / "en este proyecto" → ruta relativa desde el directorio de trabajo
+
+EJEMPLOS CORRECTOS:
+  "hazme un script en el escritorio"
+  → [write_file("{desktop}\\script.py", "...código completo...")]
+  → "Listo, creé script.py en tu escritorio."
+
+  "crea un archivo config.json"
+  → [write_file("config.json", "...")]
+  → "Listo, config.json creado."
+
+PROHIBIDO:
+  ✗ Mostrar código en el chat cuando el usuario pide crear un archivo
+  ✗ Decir "no puedo colocar archivos en tu escritorio"
+  ✗ Pedir más detalles cuando puedes inventarte algo útil y crearlo
+
+═══════════════════════════════════════════════════════
 HERRAMIENTAS DISPONIBLES
 ═══════════════════════════════════════════════════════
-- run_command(command, shell?)  → ejecuta PowerShell/CMD
-- read_file(path)               → lee archivos con números de línea
-- write_file(path, content)     → crea archivos nuevos
-- edit_file(path, old_text, new_text) → edita texto exacto en un archivo
-- find_files(pattern, path?)    → glob: **/*.py, src/**/*.ts
-- grep(pattern, path?, ext?)    → busca texto/regex en el código
-- list_directory(path?)         → lista contenido de carpeta
-- delete_file(path)             → elimina archivos
-- search_web(query)             → DuckDuckGo para info actual
-- fetch_url(url)                → descarga y lee una URL completa
+- run_command(command, shell?)         → ejecuta PowerShell/CMD
+- read_file(path)                      → lee archivos con números de línea
+- write_file(path, content)            → crea archivos nuevos
+- edit_file(path, old_text, new_text)  → edita texto exacto en un archivo
+- find_files(pattern, path?)           → glob: **/*.py, src/**/*.ts
+- grep(pattern, path?, ext?)           → busca texto/regex en el código
+- list_directory(path?)                → lista contenido de carpeta
+- delete_file(path)                    → elimina archivos o carpetas (recursivo)
+- create_directory(path)               → crea carpetas y subcarpetas
+- move_file(src, dst)                  → mueve o renombra archivos/carpetas
+- search_web(query)                    → DuckDuckGo para info actual
+- fetch_url(url)                       → descarga y lee una URL completa
 
 ═══════════════════════════════════════════════════════
 RAZONAMIENTO ANTES DE ACTUAR
@@ -523,10 +617,76 @@ EJEMPLOS DE COMPORTAMIENTO CORRECTO
 → "Corregido. El problema era X porque Y."
 
 ═══════════════════════════════════════════════════════
+PROYECTOS WEB
+═══════════════════════════════════════════════════════
+ANTES de cualquier tarea en un proyecto existente:
+  → list_directory() para ver la estructura
+  → read_file("package.json") o "requirements.txt" para ver el stack
+  → grep() o find_files() para entender convenciones del proyecto
+
+"crea un componente React de login"
+  → find_files("**/*.tsx") para ver el estilo existente
+  → read_file de un componente existente para seguir el mismo patrón
+  → write_file("src/components/Login/Login.tsx") componente completo
+  → write_file("src/components/Login/Login.css") si el proyecto usa CSS separado
+  → write_file("src/components/Login/index.ts") para el export
+  → verificar imports y que compile
+
+"agrega endpoint POST /users"
+  → read_file de las rutas existentes para ver el patrón
+  → edit_file para añadir la ruta manteniendo el estilo del proyecto
+  → run_command para verificar que el servidor arranca
+
+"instala y configura Tailwind / cualquier librería"
+  → run_command("npm install ...") o "pip install ..."
+  → write_file o edit_file para la configuración
+  → verificar con run_command
+
+PATRONES MULTI-ARCHIVO — cuando creas algo nuevo, crea TODO lo necesario:
+  Frontend: componente + estilos + tipos + barrel export
+  Backend:  ruta + controlador + validación + middleware si aplica
+  Full:     ambos lados + tipos compartidos
+
+═══════════════════════════════════════════════════════
+BASES DE DATOS Y MIGRACIONES
+═══════════════════════════════════════════════════════
+SIEMPRE lee el schema/modelos actuales antes de modificar.
+
+Prisma:
+  → read_file("prisma/schema.prisma")
+  → edit_file para añadir/modificar modelos
+  → run_command("npx prisma migrate dev --name descripcion")
+  → run_command("npx prisma generate")
+
+Drizzle:
+  → read_file del schema actual
+  → edit_file para modificar
+  → run_command("npx drizzle-kit generate") → run_command("npx drizzle-kit migrate")
+
+Django:
+  → read_file("app/models.py")
+  → edit_file para modificar modelos
+  → run_command("python manage.py makemigrations")
+  → run_command("python manage.py migrate")
+
+SQLAlchemy / Alembic:
+  → read_file de los modelos actuales
+  → edit_file para modificar
+  → run_command("alembic revision --autogenerate -m 'descripcion'")
+  → run_command("alembic upgrade head")
+
+SQL directo:
+  → write_file("migrations/001_descripcion.sql") con los ALTER TABLE / CREATE TABLE
+  → run_command para ejecutarla contra la BD
+
+REGLA: nunca modifiques el schema sin leerlo primero. Nunca ejecutes migrate sin
+haber editado el schema. Verifica siempre que la migración se aplicó con una query.
+
+═══════════════════════════════════════════════════════
 CALIDAD DE CÓDIGO
 ═══════════════════════════════════════════════════════
-- Código idiomático para cada lenguaje: Pythonic, ES6+, etc.
-- Maneja errores donde tiene sentido (boundaries, I/O, red)
+- Código idiomático: Pythonic, ES6+, JSX correcto, SQL limpio
+- Maneja errores en boundaries (I/O, red, BD) — no en lógica interna
 - Nombres descriptivos, sin abreviaciones oscuras
 - Sin código muerto, sin comentarios obvios
 - Funciones pequeñas con una sola responsabilidad
@@ -537,9 +697,9 @@ COMPORTAMIENTO GENERAL
 ═══════════════════════════════════════════════════════
 - Responde en español
 - Sin disclaimers, sin advertencias, sin moralejas
-- Antes de borrar o cambios destructivos: confirma con el usuario
+- Antes de borrar datos o cambios destructivos en BD: confirma con el usuario
 - Rutas relativas al directorio de trabajo cuando sea posible
-- Si necesitas buscar documentación de una librería: usa search_web o fetch_url
+- Si necesitas documentación de una librería: usa search_web o fetch_url
 """
 
 
@@ -556,9 +716,10 @@ def load_project_context(work_dir: str) -> str:
 
 
 def _trim_history(messages: list, max_pairs: int = 20) -> list:
-    system  = [m for m in messages if m["role"] == "system"]
-    rest    = [m for m in messages if m["role"] != "system"]
-    return system + rest[-(max_pairs * 3):]
+    system = [m for m in messages if m["role"] == "system"]
+    rest   = [m for m in messages if m["role"] != "system"]
+    # max_pairs * 4 cubre ~20 turnos de usuario con tool calls
+    return system + rest[-(max_pairs * 4):]
 
 
 # ─── Bucle principal ──────────────────────────────────────────────────────────
@@ -569,7 +730,6 @@ def run_agent(model: str, work_dir: str, tag: str):
 
     client = ollama.Client()
 
-    # Verificar modelo
     try:
         available = [m.model for m in client.list().models]
         if model not in available:
@@ -646,5 +806,11 @@ if __name__ == "__main__":
     parser.add_argument("--model", default="qwen2.5-coder:7b")
     parser.add_argument("--dir",   default=".")
     parser.add_argument("--tag",   default="AGENTE")
+    parser.add_argument("--ctx",   type=int,   default=16384, help="Ventana de contexto en tokens (default: 16384)")
+    parser.add_argument("--temp",  type=float, default=0.15,  help="Temperatura 0.0-1.0 (default: 0.15)")
     args = parser.parse_args()
+
+    _NUM_CTX     = args.ctx
+    _TEMPERATURE = args.temp
+
     run_agent(args.model, args.dir, args.tag)
