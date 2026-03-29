@@ -1,9 +1,10 @@
 """
 Agente de programacion local con Ollama - UI estilo Claude Code
-Uso: python src/agent.py [--model qwen2.5-coder:14b] [--dir C:\\mi\\proyecto] [--ctx 16384] [--temp 0.15]
+Uso: python src/agent.py [--model qwen3:14b] [--dir C:\\mi\\proyecto] [--ctx 16384] [--temp 0.15]
 """
 import json
 import subprocess
+import platform
 import os
 import sys
 import re
@@ -39,38 +40,55 @@ except ImportError:
 console = Console()
 
 # ── Colores del tema ──────────────────────────────────────────────────────────
-C_PROMPT   = "#5B9BD5"      # azul para el >
-C_BULLET   = "#4EC9B0"      # verde-azul para el •
-C_TOOL     = "#C586C0"      # morado para tool calls
-C_TOOLARG  = "#9CDCFE"      # azul claro para argumentos
-C_OK       = "#6A9955"      # verde para resultados OK
-C_ERR      = "#F44747"      # rojo para errores
-C_DIM      = "#6E7681"      # gris para info secundaria
-C_LOGO     = "#E8643B"      # naranja Claude
-C_LOGO2    = "#C0391B"      # naranja oscuro
-C_BORDER   = "#30363D"      # borde sutil
-C_TEXT     = "#D4D4D4"      # texto principal
+C_PROMPT   = "#5B9BD5"
+C_BULLET   = "#4EC9B0"
+C_TOOL     = "#C586C0"
+C_TOOLARG  = "#9CDCFE"
+C_OK       = "#6A9955"
+C_ERR      = "#F44747"
+C_DIM      = "#6E7681"
+C_LOGO     = "#E8643B"
+C_LOGO2    = "#C0391B"
+C_BORDER   = "#30363D"
+C_TEXT     = "#D4D4D4"
 
-WORK_DIR     = "."
-_NUM_CTX     = 16384   # 16K cabe en VRAM con modelos 14b en GPU de 12GB
-_TEMPERATURE = 0.15
+# Actualizado por Agent.__init__ — las funciones de herramientas lo leen vía _resolve()
+WORK_DIR = "."
+
+_OS = platform.system()  # "Windows", "Linux", "Darwin"
 
 # ─── Herramientas ─────────────────────────────────────────────────────────────
 
-def run_command(command: str, shell: str = "powershell", timeout: int = 60) -> dict:
+def run_command(command: str, shell: str = "auto", timeout: int = 60) -> dict:
+    """
+    Ejecuta un comando en el shell apropiado para el SO actual.
+    shell="auto" usa powershell en Windows y bash en Linux/macOS.
+    Evita shell=True pasando el comando como lista de argumentos.
+    """
     try:
-        if shell == "powershell":
+        effective_shell = shell
+        if shell == "auto":
+            effective_shell = "powershell" if _OS == "Windows" else "bash"
+
+        if effective_shell == "powershell":
+            cmd = ["powershell", "-NoProfile", "-Command", command]
+        elif effective_shell == "bash":
+            cmd = ["bash", "-c", command]
+        elif effective_shell == "sh":
+            cmd = ["sh", "-c", command]
+        else:  # cmd — fallback con shell=True solo para este caso
             result = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", command],
-                capture_output=True, text=True, timeout=timeout, cwd=WORK_DIR
+                command, shell=True, capture_output=True, text=True,
+                timeout=timeout, cwd=WORK_DIR
             )
-        else:
-            result = subprocess.run(
-                command, shell=True, capture_output=True, text=True, timeout=timeout, cwd=WORK_DIR
-            )
+            return {"stdout": result.stdout.strip(), "stderr": result.stderr.strip(), "returncode": result.returncode}
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=WORK_DIR)
         return {"stdout": result.stdout.strip(), "stderr": result.stderr.strip(), "returncode": result.returncode}
     except subprocess.TimeoutExpired:
         return {"error": f"Timeout: el comando tardó más de {timeout}s"}
+    except FileNotFoundError as e:
+        return {"error": f"Shell no encontrado ({effective_shell}): {e}"}
     except Exception as e:
         return {"error": str(e)}
 
@@ -99,17 +117,39 @@ def write_file(path: str, content: str) -> dict:
         return {"error": str(e)}
 
 
-def edit_file(path: str, old_text: str, new_text: str) -> dict:
+def edit_file(path: str, old_text: str, new_text: str,
+              replace_all: bool = False, use_regex: bool = False) -> dict:
+    """
+    Edita un archivo.
+    - replace_all=True  → reemplaza todas las ocurrencias (no solo la primera)
+    - use_regex=True    → old_text se interpreta como expresión regular
+    """
     try:
         p = _resolve(path)
         if not p.exists():
             return {"error": f"Archivo no encontrado: {path}"}
         content = p.read_text(encoding="utf-8", errors="replace")
-        if old_text not in content:
-            return {"error": "Texto no encontrado. Debe ser exacto (incluyendo espacios e indentación)."}
-        new_content = content.replace(old_text, new_text, 1)
+
+        if use_regex:
+            try:
+                pattern = re.compile(old_text, re.MULTILINE)
+            except re.error as e:
+                return {"error": f"Regex inválida: {e}"}
+            if not pattern.search(content):
+                return {"error": "Patrón regex no encontrado en el archivo."}
+            count = len(pattern.findall(content))
+            new_content = pattern.sub(new_text, content) if replace_all \
+                          else pattern.sub(new_text, content, count=1)
+        else:
+            if old_text not in content:
+                return {"error": "Texto no encontrado. Debe ser exacto (incluyendo espacios e indentación)."}
+            count = content.count(old_text)
+            new_content = content.replace(old_text, new_text) if replace_all \
+                          else content.replace(old_text, new_text, 1)
+
         p.write_text(new_content, encoding="utf-8")
-        return {"success": True, "path": str(p)}
+        replaced = count if replace_all else 1
+        return {"success": True, "path": str(p), "replaced": replaced}
     except Exception as e:
         return {"error": str(e)}
 
@@ -257,9 +297,11 @@ TOOL_MAP = {
 
 _BASE_TOOLS = [
     {"type": "function", "function": {"name": "run_command",
-      "description": "Ejecuta comandos PowerShell o CMD.",
+      "description": "Ejecuta comandos en el shell del SO (auto-detecta powershell/bash).",
       "parameters": {"type": "object", "properties": {
-          "command": {"type": "string"}, "shell": {"type": "string", "enum": ["powershell", "cmd"]},
+          "command": {"type": "string"},
+          "shell":   {"type": "string", "enum": ["auto", "powershell", "bash", "sh", "cmd"],
+                      "description": "Shell a usar. 'auto' selecciona el correcto para el SO."},
           "timeout": {"type": "integer"}}, "required": ["command"]}}},
     {"type": "function", "function": {"name": "read_file",
       "description": "Lee un archivo con números de línea.",
@@ -269,9 +311,13 @@ _BASE_TOOLS = [
       "parameters": {"type": "object", "properties": {
           "path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}},
     {"type": "function", "function": {"name": "edit_file",
-      "description": "Edita texto exacto en un archivo existente.",
+      "description": "Edita texto en un archivo existente. Soporta reemplazo múltiple y regex.",
       "parameters": {"type": "object", "properties": {
-          "path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}},
+          "path":        {"type": "string"},
+          "old_text":    {"type": "string"},
+          "new_text":    {"type": "string"},
+          "replace_all": {"type": "boolean", "description": "Si true, reemplaza todas las ocurrencias"},
+          "use_regex":   {"type": "boolean", "description": "Si true, old_text es una expresión regular"}},
           "required": ["path", "old_text", "new_text"]}}},
     {"type": "function", "function": {"name": "find_files",
       "description": "Busca archivos por patrón glob.",
@@ -301,17 +347,15 @@ _BASE_TOOLS = [
 
 _WEB_TOOLS = [
     {"type": "function", "function": {"name": "search_web",
-      "description": "Busca en internet con DuckDuckGo. Usa esto para noticias, documentacion, precios, cualquier info actual.",
+      "description": "Busca en internet con DuckDuckGo para info actual, documentación, noticias.",
       "parameters": {"type": "object", "properties": {
-          "query":       {"type": "string",  "description": "Terminos de busqueda"},
-          "max_results": {"type": "integer", "description": "Numero de resultados (default 5)"}
-      }, "required": ["query"]}}},
+          "query":       {"type": "string"},
+          "max_results": {"type": "integer"}}, "required": ["query"]}}},
     {"type": "function", "function": {"name": "fetch_url",
-      "description": "Descarga y lee el contenido de una URL. Usa esto para leer documentacion, articulos o paginas web.",
+      "description": "Descarga y lee el contenido de una URL.",
       "parameters": {"type": "object", "properties": {
-          "url":       {"type": "string",  "description": "URL a leer"},
-          "max_chars": {"type": "integer", "description": "Maximo de caracteres a devolver (default 4000)"}
-      }, "required": ["url"]}}},
+          "url":       {"type": "string"},
+          "max_chars": {"type": "integer"}}, "required": ["url"]}}},
 ] if WEB_AVAILABLE else []
 
 TOOLS = _BASE_TOOLS + _WEB_TOOLS
@@ -327,10 +371,9 @@ LOGO_LINES = [
 ]
 
 
-def print_header(model: str, work_dir: str, tag: str):
+def print_header(model: str, work_dir: str, tag: str, num_ctx: int, temperature: float):
     console.print()
     logo_text = Text.from_markup("\n".join(LOGO_LINES))
-
     info = Text()
     info.append(f"  {tag}", style="bold white")
     info.append("  ~  ", style=C_DIM)
@@ -339,10 +382,9 @@ def print_header(model: str, work_dir: str, tag: str):
     internet = "internet · " if WEB_AVAILABLE else ""
     info.append(f"  sin restricciones · {internet}herramientas · streaming", style=C_DIM)
     info.append("\n")
-    info.append(f"  ctx:{_NUM_CTX}  temp:{_TEMPERATURE}  {work_dir}", style=C_DIM)
+    info.append(f"  ctx:{num_ctx}  temp:{temperature}  {work_dir}", style=C_DIM)
     info.append("\n\n")
     info.append("  'salir' para terminar  ·  'limpiar' nueva sesión", style=C_DIM)
-
     console.print(Padding(Columns([logo_text, info], padding=(0, 2)), (1, 2)))
     console.print(Rule(style=C_BORDER))
     console.print()
@@ -353,10 +395,7 @@ def print_tool_call(name: str, args: dict):
     t.append("  ⚙ ", style=C_TOOL)
     t.append(name, style=f"bold {C_TOOL}")
     t.append("(", style=C_DIM)
-    parts = []
-    for k, v in args.items():
-        val = repr(v)[:100]
-        parts.append(f"{k}={val}")
+    parts = [f"{k}={repr(v)[:100]}" for k, v in args.items()]
     t.append(", ".join(parts), style=C_TOOLARG)
     t.append(")", style=C_DIM)
     console.print(t)
@@ -373,21 +412,23 @@ def print_tool_result(result: dict):
         rc  = result.get("returncode", 0)
         t.append("  ✓ ", style=C_OK)
         if out:
-            t.append(out[:1000] + ("…" if len(out) > 1000 else ""), style=C_TEXT)
+            # Sin truncamiento cuando hay error — salida completa para diagnosticar
+            if rc != 0:
+                t.append(out, style=C_TEXT)
+            else:
+                t.append(out[:1000] + ("…" if len(out) > 1000 else ""), style=C_TEXT)
         if err:
-            t.append(f"\n    stderr: {err[:300]}", style=C_ERR)
+            # stderr siempre completo — es información crítica
+            t.append(f"\n    stderr: {err}", style=C_ERR)
         if rc != 0:
             t.append(f"  [rc={rc}]", style=C_ERR)
     elif "content" in result and "url" in result:
-        # fetch_url
         t.append("  ✓ ", style=C_OK)
         t.append(f"{result.get('chars', 0)} chars  ·  {result['url'][:60]}", style=C_DIM)
     elif "content" in result:
-        # read_file
         t.append("  ✓ ", style=C_OK)
         t.append(f"{result['lines']} líneas  ·  {result['path']}", style=C_DIM)
     elif "query" in result and "results" in result:
-        # search_web
         t.append("  ✓ ", style=C_OK)
         items = result["results"]
         t.append(f"{len(items)} resultados para: {result['query']}\n", style=C_DIM)
@@ -412,7 +453,7 @@ def print_tool_result(result: dict):
     console.print(t)
 
 
-def get_input(model_short: str) -> str:
+def get_input(_: str) -> str:
     console.print()
     try:
         console.print(f"[{C_PROMPT}]>[/] ", end="")
@@ -421,60 +462,15 @@ def get_input(model_short: str) -> str:
         return "salir"
 
 
-def _build_options() -> dict:
-    return {
-        "num_ctx":        _NUM_CTX,
-        "num_batch":      512,       # tokens procesados por batch en GPU — mejora ocupacion
-        "num_gpu":        99,
-        "main_gpu":       0,
-        "f16_kv":         True,
-        "num_predict":    -1,
-        "temperature":    _TEMPERATURE,
-        "mirostat":       2,
-        "mirostat_tau":   5.0,
-        "mirostat_eta":   0.1,
-        "repeat_penalty": 1.05,
-        "repeat_last_n":  256,
-    }
-
-
-def stream_response(client, model: str, messages: list, tools: list):
-    collected  = []
-    tool_calls = []
-    options    = _build_options()
-
-    console.print(f"\n[{C_BULLET}]●[/] ", end="")
-
-    try:
-        stream = client.chat(model=model, messages=messages, tools=tools, stream=True, options=options)
-        for chunk in stream:
-            msg = chunk.message
-            if msg.tool_calls:
-                tool_calls.extend(msg.tool_calls)
-            if msg.content:
-                console.print(f"[{C_TEXT}]{escape(msg.content)}[/]", end="")
-                collected.append(msg.content)
-
-    except Exception as e:
-        if "does not support tools" in str(e):
-            stream = client.chat(model=model, messages=messages, stream=True, options=options)
-            for chunk in stream:
-                msg = chunk.message
-                if msg.content:
-                    console.print(f"[{C_TEXT}]{escape(msg.content)}[/]", end="")
-                    collected.append(msg.content)
-        else:
-            console.print(f"\n[{C_ERR}]Error: {e}[/]")
-
-    if not tool_calls:
-        console.print()
-
-    return "".join(collected), tool_calls
-
-
 # ─── Prompts ──────────────────────────────────────────────────────────────────
 
 def build_system_prompt(work_dir: str, project_context: str) -> str:
+    """
+    Fuente principal de instrucciones del agente.
+    Cualquier SYSTEM en el Modelfile de Ollama solo debe definir parámetros
+    o instrucciones muy generales — este prompt tiene precedencia en toda
+    lógica de comportamiento, herramientas y reglas de ejecución.
+    """
     desktop = str(Path.home() / "Desktop")
     return f"""/no_think
 Eres un agente autónomo de programación. Directorio de trabajo: {work_dir}
@@ -492,204 +488,99 @@ PROHIBIDO escribir frases como:
   ✗ "Te recomiendo que hagas..."
   ✗ "Primero debes..., luego..."
 
-En su lugar: HAZLO TÚ MISMO con las herramientas. Si necesitas saber algo del proyecto,
-usa list_directory o read_file. Si necesitas ejecutar algo, usa run_command. PUNTO.
+En su lugar: HAZLO TÚ MISMO con las herramientas. PUNTO.
 
 ═══════════════════════════════════════════════════════
 REGLA ABSOLUTA #2 — ENCADENA PASOS SIN PARAR NI PREGUNTAR
 ═══════════════════════════════════════════════════════
-Cuando el usuario pide una tarea, la ejecutas completa de principio a fin:
+Ejecuta la tarea completa de principio a fin:
   1. Llamas las herramientas necesarias en secuencia
   2. Usas el resultado de cada herramienta para decidir el siguiente paso
   3. No te detienes a mitad a explicar — terminas la tarea
   4. Solo al final reportas qué hiciste y el resultado
 
-PROHIBIDO interrumpir con frases como:
+PROHIBIDO:
   ✗ "¿Quieres que continúe?"
   ✗ "¿Procedo con el siguiente paso?"
-  ✗ "¿Sigo?"
   ✗ "¿Te parece bien si...?"
-  ✗ "Antes de continuar, ¿confirmas que...?"
 
-Si ya tienes suficiente información para hacer el siguiente paso → HAZLO.
-Solo pregunta al usuario si te falta información que NO puedes obtener con herramientas.
-
-Ejemplo correcto para "arregla el bug en main.py":
-  → list_directory() para ver la estructura
-  → read_file("main.py") para leer el código
-  → edit_file(...) para aplicar el fix
-  → run_command("python main.py") para verificar
-  → "Listo, corregí X en línea Y. Ahora funciona."
+Si tienes suficiente información → HAZLO.
+Solo pregunta si te falta algo que NO puedes obtener con herramientas.
 
 ═══════════════════════════════════════════════════════
 REGLA ABSOLUTA #3 — LEE ANTES DE TOCAR
 ═══════════════════════════════════════════════════════
 SIEMPRE usa read_file() antes de edit_file(). Sin excepciones.
-Si no conoces la estructura del proyecto, usa list_directory() primero.
-Si no sabes qué contiene un archivo, léelo con read_file().
+Si no conoces la estructura, usa list_directory() primero.
 
 ═══════════════════════════════════════════════════════
 REGLA ABSOLUTA #4 — CREAR ARCHIVOS = USAR write_file()
 ═══════════════════════════════════════════════════════
 Cuando el usuario pide "hazme un script / crea un archivo / escribe un programa":
-  → USA write_file(path, content) para crearlo en la ruta indicada
-  → NUNCA muestres el código en el chat como respuesta
-  → NUNCA digas "no puedo crear archivos" — TIENES write_file(), ÚSALO
+  → USA write_file(path, content) — NUNCA muestres el código en el chat
+  → NUNCA digas "no puedo crear archivos"
 
-Rutas especiales:
-  "en el escritorio"   → {desktop}\\nombre_archivo.py
-  "aquí" / "en este proyecto" → ruta relativa desde el directorio de trabajo
-
-EJEMPLOS CORRECTOS:
-  "hazme un script en el escritorio"
-  → [write_file("{desktop}\\script.py", "...código completo...")]
-  → "Listo, creé script.py en tu escritorio."
-
-  "crea un archivo config.json"
-  → [write_file("config.json", "...")]
-  → "Listo, config.json creado."
-
-PROHIBIDO:
-  ✗ Mostrar código en el chat cuando el usuario pide crear un archivo
-  ✗ Decir "no puedo colocar archivos en tu escritorio"
-  ✗ Pedir más detalles cuando puedes inventarte algo útil y crearlo
+Rutas:
+  "en el escritorio" → {desktop}\\nombre.py
+  "aquí"             → ruta relativa al directorio de trabajo
 
 ═══════════════════════════════════════════════════════
 HERRAMIENTAS DISPONIBLES
 ═══════════════════════════════════════════════════════
-- run_command(command, shell?)         → ejecuta PowerShell/CMD
+- run_command(command, shell?)         → PowerShell en Windows, bash en Linux/macOS
 - read_file(path)                      → lee archivos con números de línea
 - write_file(path, content)            → crea archivos nuevos
-- edit_file(path, old_text, new_text)  → edita texto exacto en un archivo
+- edit_file(path, old, new, replace_all?, use_regex?) → edita archivos
 - find_files(pattern, path?)           → glob: **/*.py, src/**/*.ts
 - grep(pattern, path?, ext?)           → busca texto/regex en el código
 - list_directory(path?)                → lista contenido de carpeta
-- delete_file(path)                    → elimina archivos o carpetas (recursivo)
+- delete_file(path)                    → elimina archivos o carpetas
 - create_directory(path)               → crea carpetas y subcarpetas
-- move_file(src, dst)                  → mueve o renombra archivos/carpetas
+- move_file(src, dst)                  → mueve o renombra
 - search_web(query)                    → DuckDuckGo para info actual
-- fetch_url(url)                       → descarga y lee una URL completa
-
-═══════════════════════════════════════════════════════
-RAZONAMIENTO ANTES DE ACTUAR
-═══════════════════════════════════════════════════════
-Antes de llamar herramientas, piensa internamente:
-  1. ¿Qué necesito saber? → qué herramientas debo llamar primero
-  2. ¿Cuál es la secuencia lógica de pasos?
-  3. ¿Qué puede salir mal y cómo lo manejo?
-
-Razona así para cada tarea — no lo escribas, solo actúa.
-
-═══════════════════════════════════════════════════════
-AUTOCORRECCIÓN Y VERIFICACIÓN
-═══════════════════════════════════════════════════════
-- Después de run_command: si hay error → analiza, corrige, ejecuta de nuevo (hasta 3 intentos)
-- Después de edit_file: si el texto no se encontró → re-lee el archivo y ajusta el old_text exacto
-- Después de write_file: verifica que el archivo quedó correcto con read_file
-- Si un enfoque no funciona → prueba uno diferente, no repitas lo mismo
-- Si después de 3 intentos sigue fallando → explica al usuario qué encontraste y por qué
-
-═══════════════════════════════════════════════════════
-EJEMPLOS DE COMPORTAMIENTO CORRECTO
-═══════════════════════════════════════════════════════
-
-"hay un bug en mi código"
-→ [run_command] para ejecutar y ver el error
-→ [grep] para localizar la línea del error
-→ [read_file] para leer el contexto completo
-→ [edit_file] para corregir
-→ [run_command] para verificar que ya no falla
-→ "Listo, era X en línea Y."
-
-"crea un servidor express"
-→ [run_command("npm init -y")]
-→ [run_command("npm install express")]
-→ [write_file("index.js")] con código completo y funcional
-→ [run_command("node index.js")] para verificar que arranca
-→ "Servidor corriendo en puerto 3000."
-
-"¿por qué falla mi script?"
-→ [run_command] para ver el error real
-→ [read_file] para leer el código
-→ análisis interno de la causa raíz
-→ [edit_file] con el fix correcto
-→ [run_command] para confirmar que funciona
-→ "Corregido. El problema era X porque Y."
+- fetch_url(url)                       → descarga y lee una URL
 
 ═══════════════════════════════════════════════════════
 PROYECTOS WEB
 ═══════════════════════════════════════════════════════
-ANTES de cualquier tarea en un proyecto existente:
-  → list_directory() para ver la estructura
-  → read_file("package.json") o "requirements.txt" para ver el stack
-  → grep() o find_files() para entender convenciones del proyecto
+ANTES de cualquier tarea: list_directory() + read_file("package.json" o "requirements.txt")
 
-"crea un componente React de login"
-  → find_files("**/*.tsx") para ver el estilo existente
-  → read_file de un componente existente para seguir el mismo patrón
-  → write_file("src/components/Login/Login.tsx") componente completo
-  → write_file("src/components/Login/Login.css") si el proyecto usa CSS separado
-  → write_file("src/components/Login/index.ts") para el export
-  → verificar imports y que compile
+"crea un componente React"
+  → find_files("**/*.tsx") para ver el estilo del proyecto
+  → write_file componente + estilos + index.ts export
 
-"agrega endpoint POST /users"
-  → read_file de las rutas existentes para ver el patrón
-  → edit_file para añadir la ruta manteniendo el estilo del proyecto
-  → run_command para verificar que el servidor arranca
+"agrega endpoint"
+  → read_file de rutas existentes → edit_file manteniendo el patrón
 
-"instala y configura Tailwind / cualquier librería"
-  → run_command("npm install ...") o "pip install ..."
-  → write_file o edit_file para la configuración
-  → verificar con run_command
-
-PATRONES MULTI-ARCHIVO — cuando creas algo nuevo, crea TODO lo necesario:
-  Frontend: componente + estilos + tipos + barrel export
-  Backend:  ruta + controlador + validación + middleware si aplica
-  Full:     ambos lados + tipos compartidos
+Patrones multi-archivo: crea TODOS los archivos necesarios (componente + estilos + tipos + export)
 
 ═══════════════════════════════════════════════════════
 BASES DE DATOS Y MIGRACIONES
 ═══════════════════════════════════════════════════════
-SIEMPRE lee el schema/modelos actuales antes de modificar.
+SIEMPRE lee el schema actual antes de modificar.
 
-Prisma:
-  → read_file("prisma/schema.prisma")
-  → edit_file para añadir/modificar modelos
-  → run_command("npx prisma migrate dev --name descripcion")
-  → run_command("npx prisma generate")
+Prisma:   edit schema → npx prisma migrate dev → npx prisma generate
+Django:   edit models.py → python manage.py makemigrations → migrate
+Alembic:  edit models → alembic revision --autogenerate → alembic upgrade head
+Drizzle:  edit schema → drizzle-kit generate → drizzle-kit migrate
+SQL:      write_file migration.sql → run_command para ejecutarla
 
-Drizzle:
-  → read_file del schema actual
-  → edit_file para modificar
-  → run_command("npx drizzle-kit generate") → run_command("npx drizzle-kit migrate")
+Nunca ejecutes migrate sin haber editado el schema primero.
+Confirma con el usuario antes de cambios destructivos en BD.
 
-Django:
-  → read_file("app/models.py")
-  → edit_file para modificar modelos
-  → run_command("python manage.py makemigrations")
-  → run_command("python manage.py migrate")
-
-SQLAlchemy / Alembic:
-  → read_file de los modelos actuales
-  → edit_file para modificar
-  → run_command("alembic revision --autogenerate -m 'descripcion'")
-  → run_command("alembic upgrade head")
-
-SQL directo:
-  → write_file("migrations/001_descripcion.sql") con los ALTER TABLE / CREATE TABLE
-  → run_command para ejecutarla contra la BD
-
-REGLA: nunca modifiques el schema sin leerlo primero. Nunca ejecutes migrate sin
-haber editado el schema. Verifica siempre que la migración se aplicó con una query.
+═══════════════════════════════════════════════════════
+AUTOCORRECCIÓN Y VERIFICACIÓN
+═══════════════════════════════════════════════════════
+- Después de run_command con error → analiza, corrige, reintenta (hasta 3 veces)
+- Después de edit_file fallido → re-lee y ajusta el old_text exacto
+- Si un enfoque no funciona → prueba uno diferente, no repitas lo mismo
 
 ═══════════════════════════════════════════════════════
 CALIDAD DE CÓDIGO
 ═══════════════════════════════════════════════════════
-- Código idiomático: Pythonic, ES6+, JSX correcto, SQL limpio
-- Maneja errores en boundaries (I/O, red, BD) — no en lógica interna
-- Nombres descriptivos, sin abreviaciones oscuras
-- Sin código muerto, sin comentarios obvios
-- Funciones pequeñas con una sola responsabilidad
+- Código idiomático: Pythonic, ES6+, SQL limpio
+- Maneja errores en boundaries (I/O, red, BD)
+- Nombres descriptivos, funciones pequeñas con una sola responsabilidad
 - Si hay tests existentes: córrelos después de cambiar código
 
 ═══════════════════════════════════════════════════════
@@ -698,107 +589,202 @@ COMPORTAMIENTO GENERAL
 - Responde en español
 - Sin disclaimers, sin advertencias, sin moralejas
 - Antes de borrar datos o cambios destructivos en BD: confirma con el usuario
-- Rutas relativas al directorio de trabajo cuando sea posible
-- Si necesitas documentación de una librería: usa search_web o fetch_url
+- Si necesitas documentación: usa search_web o fetch_url
 """
 
 
 def load_project_context(work_dir: str) -> str:
+    # Límite de 16000 chars para permitir contextos de proyecto amplios.
+    # Reducir si el modelo tiene ventana de contexto pequeña.
     for name in ["CLAUDE.md", "README.md", ".cursorrules"]:
         p = Path(work_dir) / name
         if p.exists():
             try:
-                content = p.read_text(encoding="utf-8", errors="replace")[:6000]
+                content = p.read_text(encoding="utf-8", errors="replace")[:16000]
                 return f"Contexto del proyecto ({name}):\n{content}\n"
             except Exception:
                 pass
     return ""
 
 
-def _trim_history(messages: list, max_pairs: int = 20) -> list:
-    system = [m for m in messages if m["role"] == "system"]
-    rest   = [m for m in messages if m["role"] != "system"]
-    # max_pairs * 4 cubre ~20 turnos de usuario con tool calls
-    return system + rest[-(max_pairs * 4):]
+# ─── Clase Agent ──────────────────────────────────────────────────────────────
 
+class Agent:
+    """
+    Encapsula el estado del agente: modelo, directorio de trabajo, cliente
+    Ollama, historial de mensajes y configuración de inferencia.
+    """
 
-# ─── Bucle principal ──────────────────────────────────────────────────────────
+    def __init__(self, model: str, work_dir: str, tag: str,
+                 num_ctx: int, temperature: float):
+        global WORK_DIR
+        self.model       = model
+        self.work_dir    = str(Path(work_dir).resolve())
+        self.tag         = tag
+        self.num_ctx     = num_ctx
+        self.temperature = temperature
+        self.client      = ollama.Client()
+        self.messages: list = []
+        # Actualiza la variable global para que las funciones de herramientas
+        # (module-level) resuelvan rutas relativas al directorio correcto.
+        WORK_DIR = self.work_dir
 
-def run_agent(model: str, work_dir: str, tag: str):
-    global WORK_DIR
-    WORK_DIR = str(Path(work_dir).resolve())
+    def _build_options(self) -> dict:
+        return {
+            "num_ctx":        self.num_ctx,
+            "num_batch":      512,
+            "num_gpu":        99,
+            "main_gpu":       0,
+            "f16_kv":         True,
+            "num_predict":    -1,
+            "temperature":    self.temperature,
+            "mirostat":       2,
+            "mirostat_tau":   5.0,
+            "mirostat_eta":   0.1,
+            "repeat_penalty": 1.05,
+            "repeat_last_n":  256,
+        }
 
-    client = ollama.Client()
+    def _trim_history(self, max_pairs: int = 20) -> list:
+        system = [m for m in self.messages if m["role"] == "system"]
+        rest   = [m for m in self.messages if m["role"] != "system"]
+        return system + rest[-(max_pairs * 4):]
 
-    try:
-        available = [m.model for m in client.list().models]
-        if model not in available:
-            console.print(f"\n[{C_ERR}]Modelo '{model}' no encontrado. Disponibles:[/]")
-            for m in available:
-                console.print(f"  [{C_DIM}]·[/] {m}")
-            if available:
-                model = available[0]
-                console.print(f"[{C_OK}]→ Usando '{model}'[/]\n")
+    def _stream_response(self, messages: list, tools: list):
+        """Hace streaming y devuelve (content, tool_calls)."""
+        collected:  list[str] = []
+        tool_calls: list      = []
+        options = self._build_options()
+
+        console.print(f"\n[{C_BULLET}]●[/] ", end="")
+
+        try:
+            stream = self.client.chat(
+                model=self.model, messages=messages, tools=tools,
+                stream=True, options=options
+            )
+            for chunk in stream:
+                msg = chunk.message
+                if msg.tool_calls:
+                    tool_calls.extend(msg.tool_calls)
+                if msg.content:
+                    console.print(f"[{C_TEXT}]{escape(msg.content)}[/]", end="")
+                    collected.append(msg.content)
+
+        except Exception as e:
+            if "does not support tools" in str(e):
+                stream = self.client.chat(
+                    model=self.model, messages=messages,
+                    stream=True, options=options
+                )
+                for chunk in stream:
+                    msg = chunk.message
+                    if msg.content:
+                        console.print(f"[{C_TEXT}]{escape(msg.content)}[/]", end="")
+                        collected.append(msg.content)
             else:
-                sys.exit(1)
-    except Exception as e:
-        console.print(f"[{C_ERR}]Error conectando a Ollama: {e}[/]")
-        sys.exit(1)
+                console.print(f"\n[{C_ERR}]Error: {e}[/]")
 
-    project_context = load_project_context(WORK_DIR)
-    system_prompt   = build_system_prompt(WORK_DIR, project_context)
+        if not tool_calls:
+            console.print()
 
-    print_header(model, WORK_DIR, tag)
+        return "".join(collected), tool_calls
 
-    messages = [{"role": "system", "content": system_prompt}]
+    def _parse_tool_args(self, tc) -> dict | None:
+        """Parsea los argumentos de un tool call con manejo robusto de errores."""
+        if isinstance(tc.function.arguments, dict):
+            return tc.function.arguments
+        try:
+            return json.loads(tc.function.arguments)
+        except (json.JSONDecodeError, TypeError) as e:
+            console.print(f"\n[{C_ERR}]  ✗ Argumentos inválidos para {tc.function.name}: {e}[/]")
+            return None
 
-    while True:
-        user_input = get_input(model.split(":")[0])
+    def _validate_model(self) -> bool:
+        try:
+            available = [m.model for m in self.client.list().models]
+            if self.model not in available:
+                console.print(f"\n[{C_ERR}]Modelo '{self.model}' no encontrado. Disponibles:[/]")
+                for m in available:
+                    console.print(f"  [{C_DIM}]·[/] {m}")
+                if available:
+                    self.model = available[0]
+                    console.print(f"[{C_OK}]→ Usando '{self.model}'[/]\n")
+                else:
+                    return False
+            return True
+        except Exception as e:
+            console.print(f"[{C_ERR}]Error conectando a Ollama: {e}[/]")
+            return False
 
-        if not user_input:
-            continue
-        if user_input.lower() in ("salir", "exit", "quit"):
-            console.print(f"\n[{C_DIM}]  Hasta luego.[/]\n")
-            break
-        if user_input.lower() in ("limpiar", "clear", "reset"):
-            messages = [{"role": "system", "content": system_prompt}]
-            console.print(f"[{C_OK}]  ✓ Sesión limpiada[/]")
-            continue
+    def run(self):
+        if not self._validate_model():
+            sys.exit(1)
 
-        messages.append({"role": "user", "content": user_input})
+        project_context = load_project_context(self.work_dir)
+        # build_system_prompt es la fuente autoritativa de instrucciones.
+        # Tiene precedencia sobre cualquier SYSTEM definido en el Modelfile.
+        system_prompt = build_system_prompt(self.work_dir, project_context)
+        self.messages = [{"role": "system", "content": system_prompt}]
+
+        print_header(self.model, self.work_dir, self.tag, self.num_ctx, self.temperature)
 
         while True:
-            full_content, tool_calls = stream_response(client, model, _trim_history(messages), TOOLS)
+            user_input = get_input(self.model.split(":")[0])
 
-            if tool_calls:
-                console.print()
-                messages.append({
-                    "role": "assistant",
-                    "content": full_content,
-                    "tool_calls": [
-                        {"id": tc.function.name, "type": "function",
-                         "function": {"name": tc.function.name,
-                                      "arguments": tc.function.arguments if isinstance(tc.function.arguments, dict)
-                                                   else json.loads(tc.function.arguments)}}
-                        for tc in tool_calls
-                    ]
-                })
-                for tc in tool_calls:
-                    fn_name = tc.function.name
-                    fn_args = tc.function.arguments if isinstance(tc.function.arguments, dict) \
-                              else json.loads(tc.function.arguments)
-                    print_tool_call(fn_name, fn_args)
-                    result = TOOL_MAP[fn_name](**fn_args) if fn_name in TOOL_MAP \
-                             else {"error": f"Tool desconocida: {fn_name}"}
-                    print_tool_result(result)
-                    messages.append({
-                        "role": "tool",
-                        "content": json.dumps(result, ensure_ascii=False),
-                        "name": fn_name
-                    })
-            else:
-                messages.append({"role": "assistant", "content": full_content})
+            if not user_input:
+                continue
+            if user_input.lower() in ("salir", "exit", "quit"):
+                console.print(f"\n[{C_DIM}]  Hasta luego.[/]\n")
                 break
+            if user_input.lower() in ("limpiar", "clear", "reset"):
+                self.messages = [{"role": "system", "content": system_prompt}]
+                console.print(f"[{C_OK}]  ✓ Sesión limpiada[/]")
+                continue
+
+            self.messages.append({"role": "user", "content": user_input})
+
+            while True:
+                trimmed = self._trim_history()
+                full_content, tool_calls = self._stream_response(trimmed, TOOLS)
+
+                if tool_calls:
+                    console.print()
+                    self.messages.append({
+                        "role": "assistant",
+                        "content": full_content,
+                        "tool_calls": [
+                            {"id": tc.function.name, "type": "function",
+                             "function": {"name": tc.function.name,
+                                          "arguments": self._parse_tool_args(tc) or {}}}
+                            for tc in tool_calls
+                        ]
+                    })
+                    for tc in tool_calls:
+                        fn_name = tc.function.name
+                        fn_args = self._parse_tool_args(tc)
+                        if fn_args is None:
+                            result = {"error": f"No se pudieron parsear los argumentos de {fn_name}"}
+                        elif fn_name in TOOL_MAP:
+                            print_tool_call(fn_name, fn_args)
+                            result = TOOL_MAP[fn_name](**fn_args)
+                        else:
+                            result = {"error": f"Tool desconocida: {fn_name}"}
+                        print_tool_result(result)
+                        self.messages.append({
+                            "role": "tool",
+                            "content": json.dumps(result, ensure_ascii=False),
+                            "name": fn_name
+                        })
+                else:
+                    self.messages.append({"role": "assistant", "content": full_content})
+                    break
+
+
+# ─── Entry point ──────────────────────────────────────────────────────────────
+
+def run_agent(model: str, work_dir: str, tag: str, num_ctx: int, temperature: float):
+    Agent(model, work_dir, tag, num_ctx, temperature).run()
 
 
 if __name__ == "__main__":
@@ -806,11 +792,7 @@ if __name__ == "__main__":
     parser.add_argument("--model", default="qwen2.5-coder:7b")
     parser.add_argument("--dir",   default=".")
     parser.add_argument("--tag",   default="AGENTE")
-    parser.add_argument("--ctx",   type=int,   default=16384, help="Ventana de contexto en tokens (default: 16384)")
-    parser.add_argument("--temp",  type=float, default=0.15,  help="Temperatura 0.0-1.0 (default: 0.15)")
+    parser.add_argument("--ctx",   type=int,   default=16384, help="Ventana de contexto en tokens")
+    parser.add_argument("--temp",  type=float, default=0.15,  help="Temperatura 0.0-1.0")
     args = parser.parse_args()
-
-    _NUM_CTX     = args.ctx
-    _TEMPERATURE = args.temp
-
-    run_agent(args.model, args.dir, args.tag)
+    run_agent(args.model, args.dir, args.tag, args.ctx, args.temp)
