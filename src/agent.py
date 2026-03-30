@@ -11,6 +11,9 @@ import sys
 import re
 import shutil
 import argparse
+import time
+import threading
+import difflib
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -30,6 +33,8 @@ except ImportError:
 
 try:
     from rich.console import Console
+    from rich.live import Live
+    from rich.spinner import Spinner
     from rich.text import Text
     from rich.padding import Padding
     from rich.columns import Columns
@@ -265,9 +270,37 @@ def edit_file(path: str, old_text: str, new_text: str,
             new_content = content.replace(old_text, new_text) if replace_all \
                           else content.replace(old_text, new_text, 1)
 
+        old_lines = content.splitlines(keepends=True)
+        new_lines = new_content.splitlines(keepends=True)
+        raw_diff  = list(difflib.unified_diff(old_lines, new_lines, n=2))
+
+        diff_entries: list = []
+        lines_added = lines_removed = 0
+        old_ln = new_ln = 0
+        for dl in raw_diff:
+            if dl.startswith("@@"):
+                m = re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", dl)
+                if m:
+                    old_ln, new_ln = int(m.group(1)), int(m.group(2))
+            elif dl.startswith("---") or dl.startswith("+++"):
+                continue
+            elif dl.startswith("-"):
+                diff_entries.append((old_ln, "removed", dl[1:].rstrip("\n")))
+                old_ln += 1; lines_removed += 1
+            elif dl.startswith("+"):
+                diff_entries.append((new_ln, "added", dl[1:].rstrip("\n")))
+                new_ln += 1; lines_added += 1
+            elif dl.startswith(" "):
+                diff_entries.append((old_ln, "context", dl[1:].rstrip("\n")))
+                old_ln += 1; new_ln += 1
+
         p.write_text(new_content, encoding="utf-8")
         replaced = count if replace_all else 1
-        return {"success": True, "path": str(p), "replaced": replaced}
+        return {
+            "success": True, "path": str(p), "replaced": replaced,
+            "added": lines_added, "removed": lines_removed,
+            "diff": diff_entries[:30],
+        }
     except Exception as e:
         return {"error": str(e)}
 
@@ -532,15 +565,109 @@ def print_header(model: str, work_dir: str, tag: str, num_ctx: int, temperature:
     console.print()
 
 
+def _render_inline(text: str) -> Text:
+    """Aplica highlighting inline: `código` en cian, **negrita** en bold."""
+    result = Text()
+    i = 0
+    while i < len(text):
+        if text[i] == "`":
+            j = text.find("`", i + 1)
+            if j != -1:
+                result.append(text[i + 1:j], style=f"bold {C_TOOLARG}")
+                i = j + 1
+                continue
+        if text[i:i + 2] == "**":
+            j = text.find("**", i + 2)
+            if j != -1:
+                result.append(text[i + 2:j], style="bold white")
+                i = j + 2
+                continue
+        result.append(text[i], style=C_TEXT)
+        i += 1
+    return result
+
+
+_TOOL_LABELS = {
+    "edit_file":        ("Update",  "path"),
+    "write_file":       ("Write",   "path"),
+    "read_file":        ("Read",    "path"),
+    "run_command":      ("Bash",    "command"),
+    "find_files":       ("Glob",    "pattern"),
+    "grep":             ("Grep",    "pattern"),
+    "list_directory":   ("LS",      "path"),
+    "delete_file":      ("Delete",  "path"),
+    "create_directory": ("Mkdir",   "path"),
+    "move_file":        ("Move",    "src"),
+    "search_web":       ("Web",     "query"),
+    "fetch_url":        ("Fetch",   "url"),
+    "change_directory": ("CD",      "path"),
+}
+
+
+def _rel(path_str: str) -> str:
+    """Convierte ruta absoluta a relativa al WORK_DIR si es posible."""
+    try:
+        return str(Path(path_str).relative_to(Path(WORK_DIR)))
+    except ValueError:
+        return path_str
+
+
 def print_tool_call(name: str, args: dict):
-    t = Text()
-    t.append("  ⚙ ", style=C_TOOL)
-    t.append(name, style=f"bold {C_TOOL}")
-    t.append("(", style=C_DIM)
-    parts = [f"{k}={repr(v)[:100]}" for k, v in args.items()]
-    t.append(", ".join(parts), style=C_TOOLARG)
-    t.append(")", style=C_DIM)
-    console.print(t)
+    if name in _TOOL_LABELS:
+        label, key = _TOOL_LABELS[name]
+        arg_val = _rel(str(args.get(key, "")))[:90]
+        t = Text()
+        t.append("● ", style=f"bold {C_BULLET}")
+        t.append(label, style=f"bold {C_TOOL}")
+        t.append("(", style=C_DIM)
+        t.append(arg_val, style=C_TOOLARG)
+        t.append(")", style=C_DIM)
+        console.print(t)
+    else:
+        t = Text()
+        t.append("● ", style=f"bold {C_BULLET}")
+        t.append(name, style=f"bold {C_TOOL}")
+        t.append("(", style=C_DIM)
+        parts = [f"{k}={repr(v)[:80]}" for k, v in args.items()]
+        t.append(", ".join(parts), style=C_TOOLARG)
+        t.append(")", style=C_DIM)
+        console.print(t)
+
+
+def _print_diff(result: dict):
+    added   = result.get("added",   0)
+    removed = result.get("removed", 0)
+    entries = result.get("diff",    [])
+
+    summary = Text()
+    summary.append("  └ ", style=C_DIM)
+    parts = []
+    if added:
+        parts.append(Text(f"Added {added} {'line' if added == 1 else 'lines'}", style=C_OK))
+    if removed:
+        parts.append(Text(f"removed {removed} {'line' if removed == 1 else 'lines'}", style=C_ERR))
+    if parts:
+        summary.append_text(parts[0])
+        for p in parts[1:]:
+            summary.append(", ", style=C_DIM)
+            summary.append_text(p)
+    console.print(summary)
+
+    for ln, kind, content in entries:
+        row = Text(overflow="fold")
+        num = f"{ln:4}"
+        if kind == "removed":
+            row.append(f"{num} ", style=C_DIM)
+            row.append("- ", style=f"bold {C_ERR}")
+            row.append(f"  {content}", style=f"{C_ERR} on #2d0000")
+        elif kind == "added":
+            row.append(f"{num} ", style=C_DIM)
+            row.append("+ ", style=f"bold {C_OK}")
+            row.append(f"  {content}", style=f"{C_OK} on #002d00")
+        else:
+            row.append(f"{num}   ", style=C_DIM)
+            row.append(f"  {content}", style=C_DIM)
+        console.print(row)
 
 
 def print_tool_result(result: dict):
@@ -548,6 +675,9 @@ def print_tool_result(result: dict):
     if "error" in result:
         t.append("  ✗ ", style=C_ERR)
         t.append(result["error"], style=C_ERR)
+    elif "diff" in result:
+        _print_diff(result)
+        return
     elif "stdout" in result:
         out = result.get("stdout", "")
         err = result.get("stderr", "")
@@ -845,19 +975,19 @@ class Agent:
     def _build_options(self) -> dict:
         return {
             "num_ctx":        self.num_ctx,
-            "num_batch":      512,
+            "num_batch":      4096,
             "num_gpu":        99,
             "main_gpu":       0,
             "f16_kv":         True,
             "num_predict":    -1,
             "temperature":    self.temperature,
             "mirostat":       2,
-            "mirostat_tau":   4.0,
+            "mirostat_tau":   3.5,
             "mirostat_eta":   0.1,
-            "repeat_penalty": 1.1,
-            "repeat_last_n":  256,
-            "top_k":          40,
-            "top_p":          0.9,
+            "repeat_penalty": 1.05,
+            "repeat_last_n":  512,
+            "top_k":          20,
+            "top_p":          0.85,
         }
 
     def _trim_history(self, max_pairs: int = 20) -> list:
@@ -871,6 +1001,8 @@ class Agent:
         collected:  list[str] = []
         tool_calls: list      = []
         options = self._build_options()
+        first_output = [True]
+        t_start = time.monotonic()
 
         def _drain(stream_iter):
             # state: None = normal, "think" = inside <think>, "thought" = inside <thought>
@@ -878,6 +1010,10 @@ class Agent:
             thought_buf: list[str] = []
             buf = ""
             for chunk in stream_iter:
+                if first_output[0]:
+                    live.stop()
+                    console.print(f"\n[{C_BULLET}]●[/] ", end="")
+                    first_output[0] = False
                 msg = chunk.message
                 if msg.tool_calls:
                     tool_calls.extend(msg.tool_calls)
@@ -901,12 +1037,12 @@ class Agent:
                         if first_tag is None:
                             cut = max(0, len(buf) - 9)  # 9 = len("<thought>")
                             if cut:
-                                console.print(f"[{C_TEXT}]{escape(buf[:cut])}[/]", end="")
+                                console.print(_render_inline(buf[:cut]), end="")
                                 collected.append(buf[:cut])
                                 buf = buf[cut:]
                             break
                         if first_pos:
-                            console.print(f"[{C_TEXT}]{escape(buf[:first_pos])}[/]", end="")
+                            console.print(_render_inline(buf[:first_pos]), end="")
                             collected.append(buf[:first_pos])
                         if first_tag == "think":
                             buf = buf[first_pos + 7:]
@@ -953,31 +1089,44 @@ class Agent:
                 elif state == "think":
                     console.print(f"[{C_DIM}]{escape(buf)}[/]", end="")
                 else:
-                    console.print(f"[{C_TEXT}]{escape(buf)}[/]", end="")
+                    console.print(_render_inline(buf), end="")
                     collected.append(buf)
 
-        console.print(f"\n[{C_BULLET}]●[/] ", end="")
-        try:
-            _drain(self.client.chat(
-                model=self.model, messages=messages, tools=tools,
-                stream=True, options=options
-            ))
-        except Exception as e:
-            if "does not support tools" in str(e):
+        with Live(Spinner("dots", text="Pensando... 0s"), console=console, transient=True, refresh_per_second=4) as live:
+            def _tick():
+                while first_output[0]:
+                    elapsed = time.monotonic() - t_start
+                    live.update(Spinner("dots", text=f"Pensando... {elapsed:.0f}s"))
+                    time.sleep(0.25)
+            threading.Thread(target=_tick, daemon=True).start()
+
+            try:
                 _drain(self.client.chat(
-                    model=self.model, messages=messages,
+                    model=self.model, messages=messages, tools=tools,
                     stream=True, options=options
                 ))
-            else:
-                console.print(f"\n[{C_ERR}]Error: {e}[/]")
-                self.logger.error(
-                    "Error en streaming LLM",
-                    extra={"error_details": str(e)},
-                    exc_info=True
-                )
+            except Exception as e:
+                if first_output[0]:
+                    live.stop()
+                    first_output[0] = False
+                if "does not support tools" in str(e):
+                    console.print(f"\n[{C_BULLET}]●[/] ", end="")
+                    _drain(self.client.chat(
+                        model=self.model, messages=messages,
+                        stream=True, options=options
+                    ))
+                else:
+                    console.print(f"\n[{C_ERR}]Error: {e}[/]")
+                    self.logger.error(
+                        "Error en streaming LLM",
+                        extra={"error_details": str(e)},
+                        exc_info=True
+                    )
 
+        elapsed_total = time.monotonic() - t_start
         if not tool_calls:
             console.print()
+        console.print(f"[{C_DIM}]✳ Brewed for {elapsed_total:.0f}s[/]")
 
         return "".join(collected), tool_calls
 
