@@ -3,6 +3,7 @@ Agente de programacion local con Ollama - UI estilo Claude Code
 Uso: python src/agent.py [--model qwen3:14b] [--dir C:\\mi\\proyecto] [--ctx 16384] [--temp 0.15]
 """
 import json
+import logging
 import subprocess
 import platform
 import os
@@ -10,6 +11,7 @@ import sys
 import re
 import shutil
 import argparse
+from datetime import datetime, timezone
 from pathlib import Path
 
 try:
@@ -37,7 +39,50 @@ except ImportError:
     print("Instala rich: pip install rich")
     sys.exit(1)
 
+try:
+    from pydantic import BaseModel, Field, ValidationError
+    PYDANTIC_AVAILABLE = True
+except ImportError:
+    PYDANTIC_AVAILABLE = False
+
 console = Console()
+
+
+# ── Logging estructurado JSON ─────────────────────────────────────────────────
+
+class _JsonFormatter(logging.Formatter):
+    """Formatea cada registro como una línea JSON (JSONL)."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload: dict = {
+            "timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
+            "level":     record.levelname,
+            "message":   record.getMessage(),
+        }
+        # Campos extra opcionales pasados como kwargs al llamar al logger
+        for key in ("user_input", "assistant_response", "tool_name",
+                    "tool_args", "tool_result", "error_details"):
+            if hasattr(record, key):
+                payload[key] = getattr(record, key)
+        if record.exc_info:
+            payload["exception"] = self.formatException(record.exc_info)
+        return json.dumps(payload, ensure_ascii=False)
+
+
+def _make_logger(name: str, log_path: Path) -> logging.Logger:
+    """Crea un logger que escribe en *log_path* sin tocar la consola."""
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False          # nunca llega a root → no aparece en consola
+
+    if not logger.handlers:           # evita duplicar handlers al reiniciar sesión
+        fh = logging.FileHandler(log_path, encoding="utf-8")
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(_JsonFormatter())
+        logger.addHandler(fh)
+
+    return logger
+
 
 # ── Colores del tema ──────────────────────────────────────────────────────────
 C_PROMPT   = "#5B9BD5"
@@ -51,6 +96,79 @@ C_LOGO     = "#E8643B"
 C_LOGO2    = "#C0391B"
 C_BORDER   = "#30363D"
 C_TEXT     = "#D4D4D4"
+
+# ── Modelos Pydantic para validación de argumentos de herramientas ────────────
+
+if PYDANTIC_AVAILABLE:
+    class RunCommandArgs(BaseModel):
+        command: str = Field(..., description="Comando a ejecutar.")
+        shell: str = Field("auto", description="Shell: 'auto', 'powershell', 'bash', 'sh', 'cmd'.")
+        timeout: int = Field(60, description="Tiempo máximo de ejecución en segundos.")
+
+    class ReadFileArgs(BaseModel):
+        path: str = Field(..., description="Ruta del archivo.")
+
+    class WriteFileArgs(BaseModel):
+        path: str = Field(..., description="Ruta del archivo.")
+        content: str = Field(..., description="Contenido a escribir.")
+
+    class EditFileArgs(BaseModel):
+        path: str = Field(..., description="Ruta del archivo.")
+        old_text: str = Field(..., description="Texto a buscar.")
+        new_text: str = Field(..., description="Texto de reemplazo.")
+        replace_all: bool = Field(False, description="Reemplazar todas las ocurrencias.")
+        use_regex: bool = Field(False, description="Interpretar old_text como regex.")
+
+    class FindFilesArgs(BaseModel):
+        pattern: str = Field(..., description="Patrón glob.")
+        path: str = Field(".", description="Directorio de búsqueda.")
+
+    class GrepArgs(BaseModel):
+        pattern: str = Field(..., description="Patrón regex a buscar.")
+        path: str = Field(".", description="Directorio de búsqueda.")
+        extension: str = Field("", description="Filtrar por extensión (ej. '.py').")
+
+    class ListDirectoryArgs(BaseModel):
+        path: str = Field(".", description="Ruta del directorio.")
+
+    class DeleteFileArgs(BaseModel):
+        path: str = Field(..., description="Ruta del archivo o carpeta.")
+
+    class CreateDirectoryArgs(BaseModel):
+        path: str = Field(..., description="Ruta de la carpeta a crear.")
+
+    class MoveFileArgs(BaseModel):
+        src: str = Field(..., description="Ruta origen.")
+        dst: str = Field(..., description="Ruta destino.")
+
+    class SearchWebArgs(BaseModel):
+        query: str = Field(..., description="Consulta de búsqueda.")
+        max_results: int = Field(5, description="Número máximo de resultados.")
+
+    class FetchUrlArgs(BaseModel):
+        url: str = Field(..., description="URL a descargar.")
+        max_chars: int = Field(4000, description="Máximo de caracteres a retornar.")
+
+    class ChangeDirectoryArgs(BaseModel):
+        path: str = Field(..., description="Ruta del nuevo directorio de trabajo.")
+
+    TOOL_SCHEMA_MAP: dict = {
+        "run_command":      RunCommandArgs,
+        "read_file":        ReadFileArgs,
+        "write_file":       WriteFileArgs,
+        "edit_file":        EditFileArgs,
+        "find_files":       FindFilesArgs,
+        "grep":             GrepArgs,
+        "list_directory":   ListDirectoryArgs,
+        "delete_file":      DeleteFileArgs,
+        "create_directory": CreateDirectoryArgs,
+        "move_file":        MoveFileArgs,
+        "search_web":       SearchWebArgs,
+        "fetch_url":        FetchUrlArgs,
+        "change_directory": ChangeDirectoryArgs,
+    }
+else:
+    TOOL_SCHEMA_MAP = {}
 
 # Actualizado por Agent.__init__ — las funciones de herramientas lo leen vía _resolve()
 WORK_DIR = "."
@@ -280,6 +398,24 @@ def _resolve(path: str) -> Path:
     return p.resolve()
 
 
+def change_directory(path: str) -> dict:
+    """Cambia el directorio de trabajo activo del agente."""
+    global WORK_DIR
+    try:
+        p = Path(path)
+        if not p.is_absolute():
+            p = Path(WORK_DIR) / p
+        p = p.resolve()
+        if not p.exists():
+            return {"error": f"Directorio no encontrado: {path}"}
+        if not p.is_dir():
+            return {"error": f"No es un directorio: {path}"}
+        WORK_DIR = str(p)
+        return {"success": True, "cwd": str(p)}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 TOOL_MAP = {
     "run_command":      run_command,
     "read_file":        read_file,
@@ -293,6 +429,7 @@ TOOL_MAP = {
     "move_file":        move_file,
     "search_web":       search_web,
     "fetch_url":        fetch_url,
+    "change_directory": change_directory,
 }
 
 _BASE_TOOLS = [
@@ -343,6 +480,11 @@ _BASE_TOOLS = [
           "src": {"type": "string", "description": "Ruta origen"},
           "dst": {"type": "string", "description": "Ruta destino"}},
           "required": ["src", "dst"]}}},
+    {"type": "function", "function": {"name": "change_directory",
+      "description": "Cambia el directorio de trabajo activo. Úsalo cuando el usuario mencione un directorio específico distinto al actual.",
+      "parameters": {"type": "object", "properties": {
+          "path": {"type": "string", "description": "Ruta absoluta o relativa del nuevo directorio de trabajo"}},
+          "required": ["path"]}}},
 ]
 
 _WEB_TOOLS = [
@@ -443,6 +585,9 @@ def print_tool_result(result: dict):
     elif "results" in result:
         t.append("  ✓ ", style=C_OK)
         t.append(f"{len(result['results'])} coincidencias", style=C_DIM)
+    elif "cwd" in result:
+        t.append("  ✓ ", style=C_OK)
+        t.append(f"directorio → {result['cwd']}", style=C_TOOLARG)
     elif "success" in result:
         t.append("  ✓ ", style=C_OK)
         detail = result.get("to") or result.get("path") or result.get("deleted") or "ok"
@@ -472,8 +617,7 @@ def build_system_prompt(work_dir: str, project_context: str) -> str:
     lógica de comportamiento, herramientas y reglas de ejecución.
     """
     desktop = str(Path.home() / "Desktop")
-    return f"""/no_think
-Eres un agente autónomo de programación. Directorio de trabajo: {work_dir}
+    return f"""Eres un agente autónomo de programación. Directorio de trabajo: {work_dir}
 Escritorio del usuario: {desktop}
 
 {project_context}
@@ -508,13 +652,21 @@ Si tienes suficiente información → HAZLO.
 Solo pregunta si te falta algo que NO puedes obtener con herramientas.
 
 ═══════════════════════════════════════════════════════
-REGLA ABSOLUTA #3 — LEE ANTES DE TOCAR
+REGLA ABSOLUTA #3 — DIRECTORIO CORRECTO ANTES DE ACTUAR
+═══════════════════════════════════════════════════════
+Si el usuario menciona un directorio específico (ej. "en C:\\proyecto", "en la carpeta X",
+"en D:\\trabajo\\app"), llama PRIMERO a change_directory(path) para establecerlo como
+directorio activo. A partir de ese momento todas las rutas relativas apuntan ahí.
+NUNCA ignores el directorio que el usuario indica — cámbialo antes de operar.
+
+═══════════════════════════════════════════════════════
+REGLA ABSOLUTA #4 — LEE ANTES DE TOCAR
 ═══════════════════════════════════════════════════════
 SIEMPRE usa read_file() antes de edit_file(). Sin excepciones.
 Si no conoces la estructura, usa list_directory() primero.
 
 ═══════════════════════════════════════════════════════
-REGLA ABSOLUTA #4 — CREAR ARCHIVOS = USAR write_file()
+REGLA ABSOLUTA #5 — CREAR ARCHIVOS = USAR write_file()
 ═══════════════════════════════════════════════════════
 Cuando el usuario pide "hazme un script / crea un archivo / escribe un programa":
   → USA write_file(path, content) — NUNCA muestres el código en el chat
@@ -523,6 +675,16 @@ Cuando el usuario pide "hazme un script / crea un archivo / escribe un programa"
 Rutas:
   "en el escritorio" → {desktop}\\nombre.py
   "aquí"             → ruta relativa al directorio de trabajo
+
+═══════════════════════════════════════════════════════
+REGLA ABSOLUTA #6 — EXPLORA ANTES DE CONSTRUIR
+═══════════════════════════════════════════════════════
+Si no estás 100% seguro de cómo proceder (uso de una API, estructura de un
+archivo, librería desconocida, comportamiento de un comando):
+  → USA search_web() y fetch_url() para investigar la documentación real.
+  → USA list_directory() y read_file() para entender el contexto del proyecto.
+Es MEJOR gastar tokens en investigación que en intentos fallidos.
+No adivines. No inventes. Investiga.
 
 ═══════════════════════════════════════════════════════
 HERRAMIENTAS DISPONIBLES
@@ -537,6 +699,7 @@ HERRAMIENTAS DISPONIBLES
 - delete_file(path)                    → elimina archivos o carpetas
 - create_directory(path)               → crea carpetas y subcarpetas
 - move_file(src, dst)                  → mueve o renombra
+- change_directory(path)               → cambia el directorio de trabajo activo
 - search_web(query)                    → DuckDuckGo para info actual
 - fetch_url(url)                       → descarga y lee una URL
 
@@ -571,9 +734,19 @@ Confirma con el usuario antes de cambios destructivos en BD.
 ═══════════════════════════════════════════════════════
 AUTOCORRECCIÓN Y VERIFICACIÓN
 ═══════════════════════════════════════════════════════
-- Después de run_command con error → analiza, corrige, reintenta (hasta 3 veces)
-- Después de edit_file fallido → re-lee y ajusta el old_text exacto
-- Si un enfoque no funciona → prueba uno diferente, no repitas lo mismo
+Si una herramienta devuelve error (run_command rc!=0, edit_file texto no encontrado, etc.):
+  1. Lee el mensaje de error COMPLETO, especialmente stderr — es información crítica.
+  2. Revisa tu <thought> anterior y el contexto del proyecto (re-lee archivos si hace falta).
+  3. Formula una nueva hipótesis sobre la causa raíz del fallo.
+  4. Ejecuta la corrección inmediatamente — sin explicar al usuario.
+  5. Repite hasta 3 intentos por problema.
+  → Solo si después de 3 intentos fallidos no puedes resolverlo, reporta al usuario
+    con: qué intentaste, qué devolvió cada intento, y tu hipótesis sobre la causa.
+
+Reglas adicionales:
+  - Si un enfoque no funciona → prueba uno DIFERENTE, no repitas lo mismo ciegamente.
+  - Después de edit_file fallido → re-lee el archivo para obtener el old_text exacto.
+  - Después de write_file → verifica con read_file que el contenido es correcto.
 
 ═══════════════════════════════════════════════════════
 CALIDAD DE CÓDIGO
@@ -582,6 +755,42 @@ CALIDAD DE CÓDIGO
 - Maneja errores en boundaries (I/O, red, BD)
 - Nombres descriptivos, funciones pequeñas con una sola responsabilidad
 - Si hay tests existentes: córrelos después de cambiar código
+
+═══════════════════════════════════════════════════════
+RAZONAMIENTO INTERNO (Chain of Thought — First Principles)
+═══════════════════════════════════════════════════════
+SIEMPRE, antes de responder o llamar a una herramienta, razona internamente.
+Usa el siguiente formato ESTRUCTURADO y RIGUROSO:
+
+<thought>
+**1. Entendimiento:** El usuario solicita [resumen exacto de la tarea en mis propias palabras].
+**2. Desglose y Primeros Principios:** Para lograr esto necesito [componentes clave, dependencias, conceptos fundamentales].
+**3. Plan de Acción:**
+   a. [Herramienta 1] con [argumentos] para [propósito concreto].
+   b. [Herramienta 2] con [argumentos] para [propósito concreto].
+   c. ...
+**4. Suposiciones y Riesgos:** Asumo que [suposición]. Riesgo potencial: [efecto secundario o fallo posible].
+**5. Verificación:** Validaré la solución mediante [método: tests, read_file, run_command, etc.].
+**6. Auto-Crítica:** ¿Es este el camino más eficiente? ¿He considerado todos los casos borde?
+</thought>
+
+Después de tu <thought>, genera la respuesta final o llama a la herramienta.
+El contenido de <thought> NUNCA se incluye en la salida visible al usuario.
+
+═══════════════════════════════════════════════════════
+ESTILO DE RESPUESTA AL USUARIO
+═══════════════════════════════════════════════════════
+Tus respuestas deben ser:
+  - Concisas y directas — ve al grano.
+  - Técnicas y orientadas al resultado.
+  - Sin frases de cortesía vacías ("Entiendo tu petición", "Claro que sí", "Por supuesto").
+  - Sin disclaimers ni advertencias innecesarias.
+  - Sin explicar lo que vas a hacer — HAZLO y reporta el resultado.
+
+Formato correcto:
+  ✓ "Corregido el bug en línea 42 de main.py. El test pasa ahora."
+  ✓ "Creado src/utils/parser.py con las funciones solicitadas."
+  ✗ "Entiendo que quieres que arregle el bug. Voy a proceder a analizar el archivo..."
 
 ═══════════════════════════════════════════════════════
 COMPORTAMIENTO GENERAL
@@ -629,6 +838,10 @@ class Agent:
         # (module-level) resuelvan rutas relativas al directorio correcto.
         WORK_DIR = self.work_dir
 
+        # Logger de auditoría — escribe en work_dir/agent_session.jsonl
+        log_path = Path(self.work_dir) / "agent_session.jsonl"
+        self.logger = _make_logger(f"agent.{id(self)}", log_path)
+
     def _build_options(self) -> dict:
         return {
             "num_ctx":        self.num_ctx,
@@ -639,10 +852,12 @@ class Agent:
             "num_predict":    -1,
             "temperature":    self.temperature,
             "mirostat":       2,
-            "mirostat_tau":   5.0,
+            "mirostat_tau":   4.0,
             "mirostat_eta":   0.1,
-            "repeat_penalty": 1.05,
+            "repeat_penalty": 1.1,
             "repeat_last_n":  256,
+            "top_k":          40,
+            "top_p":          0.9,
         }
 
     def _trim_history(self, max_pairs: int = 20) -> list:
@@ -651,39 +866,115 @@ class Agent:
         return system + rest[-(max_pairs * 4):]
 
     def _stream_response(self, messages: list, tools: list):
-        """Hace streaming y devuelve (content, tool_calls)."""
+        """Hace streaming y devuelve (content, tool_calls).
+        Detecta bloques <think>...</think> y los muestra en gris dim."""
         collected:  list[str] = []
         tool_calls: list      = []
         options = self._build_options()
 
-        console.print(f"\n[{C_BULLET}]●[/] ", end="")
-
-        try:
-            stream = self.client.chat(
-                model=self.model, messages=messages, tools=tools,
-                stream=True, options=options
-            )
-            for chunk in stream:
+        def _drain(stream_iter):
+            # state: None = normal, "think" = inside <think>, "thought" = inside <thought>
+            state = None
+            thought_buf: list[str] = []
+            buf = ""
+            for chunk in stream_iter:
                 msg = chunk.message
                 if msg.tool_calls:
                     tool_calls.extend(msg.tool_calls)
-                if msg.content:
-                    console.print(f"[{C_TEXT}]{escape(msg.content)}[/]", end="")
-                    collected.append(msg.content)
+                # Campo thinking separado (Ollama >= 0.6)
+                if getattr(msg, "thinking", None):
+                    if state != "think":
+                        console.print(f"\n[{C_DIM}]  💭 ", end="")
+                        state = "think"
+                    console.print(f"[{C_DIM}]{escape(msg.thinking)}[/]", end="")
+                if not msg.content:
+                    continue
+                buf += msg.content
+                while True:
+                    if state is None:
+                        ti  = buf.find("<think>")
+                        thi = buf.find("<thought>")
+                        first_tag = None
+                        first_pos = len(buf)
+                        if ti  != -1 and ti  < first_pos: first_pos, first_tag = ti,  "think"
+                        if thi != -1 and thi < first_pos: first_pos, first_tag = thi, "thought"
+                        if first_tag is None:
+                            cut = max(0, len(buf) - 9)  # 9 = len("<thought>")
+                            if cut:
+                                console.print(f"[{C_TEXT}]{escape(buf[:cut])}[/]", end="")
+                                collected.append(buf[:cut])
+                                buf = buf[cut:]
+                            break
+                        if first_pos:
+                            console.print(f"[{C_TEXT}]{escape(buf[:first_pos])}[/]", end="")
+                            collected.append(buf[:first_pos])
+                        if first_tag == "think":
+                            buf = buf[first_pos + 7:]
+                            state = "think"
+                            console.print(f"\n[{C_DIM}]  💭 ", end="")
+                        else:
+                            buf = buf[first_pos + 9:]
+                            state = "thought"
+                            thought_buf = []
+                    elif state == "thought":
+                        i = buf.find("</thought>")
+                        if i == -1:
+                            cut = max(0, len(buf) - 10)  # 10 = len("</thought>")
+                            if cut:
+                                thought_buf.append(buf[:cut])
+                                buf = buf[cut:]
+                            break
+                        thought_buf.append(buf[:i])
+                        buf = buf[i + 10:]
+                        state = None
+                        thought_content = "".join(thought_buf)
+                        if thought_content.strip():
+                            self.logger.debug(
+                                "Razonamiento interno",
+                                extra={"tool_args": {"thought": thought_content[:2000]}}
+                            )
+                        console.print(f"\n[{C_BULLET}]●[/] ", end="")
+                    else:  # state == "think"
+                        i = buf.find("</think>")
+                        if i == -1:
+                            cut = max(0, len(buf) - 8)
+                            if cut:
+                                console.print(f"[{C_DIM}]{escape(buf[:cut])}[/]", end="")
+                                buf = buf[cut:]
+                            break
+                        if i:
+                            console.print(f"[{C_DIM}]{escape(buf[:i])}[/]", end="")
+                        buf = buf[i + 8:]
+                        state = None
+                        console.print(f"\n[{C_BULLET}]●[/] ", end="")
+            if buf.strip():
+                if state == "thought":
+                    thought_buf.append(buf)
+                elif state == "think":
+                    console.print(f"[{C_DIM}]{escape(buf)}[/]", end="")
+                else:
+                    console.print(f"[{C_TEXT}]{escape(buf)}[/]", end="")
+                    collected.append(buf)
 
+        console.print(f"\n[{C_BULLET}]●[/] ", end="")
+        try:
+            _drain(self.client.chat(
+                model=self.model, messages=messages, tools=tools,
+                stream=True, options=options
+            ))
         except Exception as e:
             if "does not support tools" in str(e):
-                stream = self.client.chat(
+                _drain(self.client.chat(
                     model=self.model, messages=messages,
                     stream=True, options=options
-                )
-                for chunk in stream:
-                    msg = chunk.message
-                    if msg.content:
-                        console.print(f"[{C_TEXT}]{escape(msg.content)}[/]", end="")
-                        collected.append(msg.content)
+                ))
             else:
                 console.print(f"\n[{C_ERR}]Error: {e}[/]")
+                self.logger.error(
+                    "Error en streaming LLM",
+                    extra={"error_details": str(e)},
+                    exc_info=True
+                )
 
         if not tool_calls:
             console.print()
@@ -699,6 +990,21 @@ class Agent:
         except (json.JSONDecodeError, TypeError) as e:
             console.print(f"\n[{C_ERR}]  ✗ Argumentos inválidos para {tc.function.name}: {e}[/]")
             return None
+
+    def _validate_tool_args(self, fn_name: str, args: dict) -> dict:
+        """Valida argumentos contra el modelo Pydantic correspondiente.
+        Devuelve los argumentos validados (con defaults aplicados) o un dict con 'error'."""
+        if not PYDANTIC_AVAILABLE:
+            return args
+        model_cls = TOOL_SCHEMA_MAP.get(fn_name)
+        if not model_cls:
+            return args
+        try:
+            validated = model_cls(**args)
+            return validated.model_dump()
+        except ValidationError as e:
+            msgs = "; ".join(f"{err['loc'][0]}: {err['msg']}" for err in e.errors())
+            return {"error": f"ValidationError en '{fn_name}': {msgs}"}
 
     def _validate_model(self) -> bool:
         try:
@@ -722,10 +1028,16 @@ class Agent:
             sys.exit(1)
 
         project_context = load_project_context(self.work_dir)
-        # build_system_prompt es la fuente autoritativa de instrucciones.
-        # Tiene precedencia sobre cualquier SYSTEM definido en el Modelfile.
         system_prompt = build_system_prompt(self.work_dir, project_context)
         self.messages = [{"role": "system", "content": system_prompt}]
+
+        self.logger.info("Sesión iniciada", extra={
+            "tool_args": {
+                "model": self.model, "work_dir": self.work_dir,
+                "tag": self.tag, "num_ctx": self.num_ctx,
+                "temperature": self.temperature,
+            }
+        })
 
         print_header(self.model, self.work_dir, self.tag, self.num_ctx, self.temperature)
 
@@ -736,17 +1048,26 @@ class Agent:
                 continue
             if user_input.lower() in ("salir", "exit", "quit"):
                 console.print(f"\n[{C_DIM}]  Hasta luego.[/]\n")
+                self.logger.info("Sesión finalizada por el usuario")
                 break
             if user_input.lower() in ("limpiar", "clear", "reset"):
                 self.messages = [{"role": "system", "content": system_prompt}]
                 console.print(f"[{C_OK}]  ✓ Sesión limpiada[/]")
+                self.logger.info("Historial limpiado")
                 continue
 
+            self.logger.info("Mensaje del usuario", extra={"user_input": user_input})
             self.messages.append({"role": "user", "content": user_input})
 
             while True:
                 trimmed = self._trim_history()
                 full_content, tool_calls = self._stream_response(trimmed, TOOLS)
+
+                if full_content:
+                    self.logger.info(
+                        "Respuesta del asistente",
+                        extra={"assistant_response": full_content[:2000]}
+                    )
 
                 if tool_calls:
                     console.print()
@@ -765,11 +1086,46 @@ class Agent:
                         fn_args = self._parse_tool_args(tc)
                         if fn_args is None:
                             result = {"error": f"No se pudieron parsear los argumentos de {fn_name}"}
+                            self.logger.error(
+                                "Error al parsear argumentos de herramienta",
+                                extra={"tool_name": fn_name, "error_details": result["error"]}
+                            )
                         elif fn_name in TOOL_MAP:
-                            print_tool_call(fn_name, fn_args)
-                            result = TOOL_MAP[fn_name](**fn_args)
+                            fn_args = self._validate_tool_args(fn_name, fn_args)
+                            if "error" in fn_args:
+                                result = fn_args
+                                self.logger.warning(
+                                    "Validación de argumentos fallida",
+                                    extra={"tool_name": fn_name, "error_details": fn_args["error"]}
+                                )
+                            else:
+                                self.logger.debug(
+                                    "Llamada a herramienta",
+                                    extra={"tool_name": fn_name, "tool_args": fn_args}
+                                )
+                                print_tool_call(fn_name, fn_args)
+                                result = TOOL_MAP[fn_name](**fn_args)
+                                self.logger.debug(
+                                    "Resultado de herramienta",
+                                    extra={
+                                        "tool_name": fn_name,
+                                        "tool_result": {
+                                            k: (str(v)[:500] if isinstance(v, str) else v)
+                                            for k, v in result.items()
+                                        }
+                                    }
+                                )
+                                if "error" in result:
+                                    self.logger.error(
+                                        "Herramienta devolvió error",
+                                        extra={"tool_name": fn_name, "error_details": result["error"]}
+                                    )
                         else:
                             result = {"error": f"Tool desconocida: {fn_name}"}
+                            self.logger.error(
+                                "Tool desconocida",
+                                extra={"tool_name": fn_name, "error_details": result["error"]}
+                            )
                         print_tool_result(result)
                         self.messages.append({
                             "role": "tool",
@@ -783,16 +1139,74 @@ class Agent:
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
 
+RECOMMENDED_MODELS = [
+    # ── Todo en VRAM 12GB · RTX 5070 · rápido ─────────────────────────────────
+    ("qwen2.5-coder:14b",     "Coding · ~8.5GB VRAM · Mejor coder todo-GPU",   "⭐⭐⭐⭐⭐"),
+    ("deepseek-r1:14b",       "Razonamiento · ~8.5GB VRAM · Thinking model",   "⭐⭐⭐⭐⭐"),
+    ("deepseek-coder-v2:16b", "Coding MoE · ~10GB VRAM · Muy eficiente",       "⭐⭐⭐⭐⭐"),
+    ("mistral-nemo:12b",      "General+Coding · ~7.5GB VRAM · Multilingüe",    "⭐⭐⭐⭐ "),
+    ("dolphin3:8b",           "Sin censura · ~5GB VRAM · Llama3-based",        "⭐⭐⭐⭐ "),
+    ("qwen2.5-coder:7b",      "Coding · ~4.5GB VRAM · Más rápido",             "⭐⭐⭐⭐ "),
+    # ── VRAM + RAM offload · más potente · algo más lento ─────────────────────
+    ("qwen2.5-coder:32b",     "Coding · ~12+7GB RAM · Máxima calidad",         "⭐⭐⭐⭐⭐"),
+    ("codestral:22b",         "Coding · ~13GB VRAM+RAM · Mistral coding",      "⭐⭐⭐⭐⭐"),
+    ("deepseek-r1:32b",       "Razonamiento · ~12+7GB RAM · Thinking máximo",  "⭐⭐⭐⭐⭐"),
+    ("dolphin-mistral:7b",    "Sin censura · ~4.5GB VRAM · Mistral-based",     "⭐⭐⭐⭐ "),
+]
+
+
+def select_model_menu() -> str:
+    """Menú interactivo de selección de modelo al arrancar."""
+    try:
+        import ollama as _ollama
+        installed = {m.model for m in _ollama.Client().list().models}
+    except Exception:
+        installed = set()
+
+    console.print(f"\n[{C_LOGO}]  Selecciona un modelo para esta sesión:[/]\n")
+
+    rec_names = [r[0] for r in RECOMMENDED_MODELS]
+    for i, (model, desc, stars) in enumerate(RECOMMENDED_MODELS, 1):
+        tick = f"[{C_OK}]✓[/]" if model in installed else f"[{C_DIM}] [/]"
+        console.print(f"  [{C_LOGO}]{i:2}[/]  {tick}  {stars}  [bold]{model}[/]")
+        console.print(f"           [{C_DIM}]{desc}[/]")
+
+    others = sorted(m for m in installed if m not in rec_names)
+    if others:
+        console.print(f"\n  [{C_DIM}]── Otros instalados ──[/]")
+        for i, m in enumerate(others, len(RECOMMENDED_MODELS) + 1):
+            console.print(f"  [{C_DIM}]{i:2}  ✓  {m}[/]")
+
+    all_models = rec_names + others
+    default = "qwen2.5-coder:14b"
+    console.print(f"\n  [{C_DIM}]Número, nombre exacto, o Enter [{default}]:[/] ", end="")
+
+    try:
+        choice = input("").strip()
+    except (EOFError, KeyboardInterrupt):
+        console.print()
+        return default
+
+    if not choice:
+        return default
+    if choice.isdigit():
+        idx = int(choice) - 1
+        if 0 <= idx < len(all_models):
+            return all_models[idx]
+    return choice
+
+
 def run_agent(model: str, work_dir: str, tag: str, num_ctx: int, temperature: float):
     Agent(model, work_dir, tag, num_ctx, temperature).run()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Agente local con Ollama")
-    parser.add_argument("--model", default="qwen2.5-coder:7b")
+    parser.add_argument("--model", default=None, help="Modelo Ollama (omitir para menú interactivo)")
     parser.add_argument("--dir",   default=".")
     parser.add_argument("--tag",   default="AGENTE")
     parser.add_argument("--ctx",   type=int,   default=16384, help="Ventana de contexto en tokens")
     parser.add_argument("--temp",  type=float, default=0.15,  help="Temperatura 0.0-1.0")
     args = parser.parse_args()
-    run_agent(args.model, args.dir, args.tag, args.ctx, args.temp)
+    model = args.model if args.model else select_model_menu()
+    run_agent(model, args.dir, args.tag, args.ctx, args.temp)
