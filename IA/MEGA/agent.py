@@ -818,10 +818,14 @@ class Agent:
                     except json.JSONDecodeError: pass
                 for obj in candidates:
                     if isinstance(obj, dict) and "name" in obj and "arguments" in obj:
+                        args = obj["arguments"]
+                        if not isinstance(args, dict):
+                            try: args = json.loads(args)
+                            except (json.JSONDecodeError, TypeError): args = {}
                         tool_calls_raw.append({
-                            "name": obj["name"],
-                            "arguments": obj["arguments"] if isinstance(obj["arguments"], dict)
-                                         else json.loads(obj["arguments"])
+                            "id":        obj.get("id", obj["name"]),
+                            "name":      obj["name"],
+                            "arguments": args,
                         })
                 if tool_calls_raw:
                     collected.clear()  # no mostrar el JSON crudo como texto
