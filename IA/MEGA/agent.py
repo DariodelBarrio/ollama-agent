@@ -307,12 +307,80 @@ def change_directory(path: str) -> dict:
         WORK_DIR = str(p); return {"success": True, "cwd": str(p)}
     except Exception as e: return {"error": str(e)}
 
+
+# ── Memoria Persistente + Compactación + Keyword Triggers ────────────────────
+MEMORY_FILE = _SCRIPT_DIR / "agent_memory.json"
+COMPACT_THRESHOLD = 50  # mensajes antes de auto-compactar
+
+def load_memories() -> dict:
+    try:
+        if MEMORY_FILE.exists():
+            return json.loads(MEMORY_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {"facts": {}, "patterns": {}, "preferences": {}}
+
+def save_memory(key: str, value: str, category: str = "facts") -> dict:
+    mems = load_memories()
+    if category not in mems:
+        mems[category] = {}
+    mems[category][key] = value
+    try:
+        MEMORY_FILE.write_text(json.dumps(mems, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"success": True, "key": key, "category": category}
+    except Exception as e:
+        return {"error": str(e)}
+
+def delete_memory(key: str, category: str = "facts") -> dict:
+    mems = load_memories()
+    if category in mems and key in mems[category]:
+        del mems[category][key]
+        try:
+            MEMORY_FILE.write_text(json.dumps(mems, ensure_ascii=False, indent=2), encoding="utf-8")
+            return {"success": True, "deleted": f"{category}/{key}"}
+        except Exception as e:
+            return {"error": str(e)}
+    return {"error": f"'{key}' no encontrado en '{category}'"}
+
+def format_memories(mems: dict) -> str:
+    items = [(cat, k, v) for cat, d in mems.items() for k, v in (d or {}).items()]
+    if not items:
+        return ""
+    lines = ["═══════════════════════════════════════════════════════",
+             "MEMORIAS DE SESIONES ANTERIORES",
+             "═══════════════════════════════════════════════════════"]
+    for cat, k, v in items:
+        lines.append(f"  [{cat}] {k}: {v}")
+    return "\n".join(lines) + "\n"
+
+_KW_MODES = [
+    (r'\b(planifica|plan\s+detallado|plan\s+paso\s+a\s+paso)\b',
+     'plan', "Primero genera un plan detallado paso a paso sin usar herramientas. Tarea: "),
+    (r'\b(revisa|review)\b.{0,50}\b(código|code|codebase|archivo|función)\b',
+     'review', "Revisa el código en profundidad: bugs, seguridad, performance, code smells. "),
+    (r'\b(busca\s+(el\s+)?bugs?|bughunter|encuentra\s+(el\s+)?(bug|error))\b',
+     'debug', "Modo bughunter: hipótesis → reproduce → localiza → corrige. "),
+    (r'\bauditor[íi]a\s+de\s+seguridad\b|security\s+audit\b',
+     'security', "Auditoría de seguridad: inyección, auth, autorización, datos sensibles, dependencias vulnerables. "),
+]
+
+def detect_keyword_mode(text: str) -> tuple[str, str]:
+    """Detecta triggers de modo en el prompt. Retorna (mode, texto_modificado)."""
+    if text.startswith("/"):
+        return "", text
+    for pattern, mode, prefix in _KW_MODES:
+        if re.search(pattern, text, re.I):
+            return mode, prefix + text
+    return "", text
+
+
 TOOL_MAP = {
     "run_command": run_command, "read_file": read_file, "write_file": write_file,
     "edit_file": edit_file, "find_files": find_files, "grep": grep,
     "list_directory": list_directory, "delete_file": delete_file,
     "create_directory": create_directory, "move_file": move_file,
     "search_web": search_web, "fetch_url": fetch_url, "change_directory": change_directory,
+    "save_memory": save_memory, "delete_memory": delete_memory,
 }
 
 TOOLS = [
@@ -327,6 +395,8 @@ TOOLS = [
     {"type":"function","function":{"name":"create_directory","description":"Crea carpeta.","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}},
     {"type":"function","function":{"name":"move_file","description":"Mueve o renombra.","parameters":{"type":"object","properties":{"src":{"type":"string"},"dst":{"type":"string"}},"required":["src","dst"]}}},
     {"type":"function","function":{"name":"change_directory","description":"Cambia directorio de trabajo activo.","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}},
+    {"type":"function","function":{"name":"save_memory","description":"Guarda un hecho duradero en memoria persistente entre sesiones.","parameters":{"type":"object","properties":{"key":{"type":"string","description":"Nombre corto en snake_case"},"value":{"type":"string","description":"Descripción concisa"},"category":{"type":"string","enum":["facts","patterns","preferences","bugs"]}},"required":["key","value"]}}},
+    {"type":"function","function":{"name":"delete_memory","description":"Elimina una memoria guardada.","parameters":{"type":"object","properties":{"key":{"type":"string"},"category":{"type":"string","enum":["facts","patterns","preferences","bugs"]}},"required":["key"]}}},
 ] + ([
     {"type":"function","function":{"name":"search_web","description":"Busca en internet con DuckDuckGo.","parameters":{"type":"object","properties":{"query":{"type":"string"},"max_results":{"type":"integer"}},"required":["query"]}}},
     {"type":"function","function":{"name":"fetch_url","description":"Descarga y lee el contenido de una URL.","parameters":{"type":"object","properties":{"url":{"type":"string"},"max_chars":{"type":"integer"}},"required":["url"]}}},
@@ -389,7 +459,7 @@ _TOOL_LABELS = {
     "run_command":("Bash","command"), "find_files":("Glob","pattern"), "grep":("Grep","pattern"),
     "list_directory":("LS","path"), "delete_file":("Delete","path"), "create_directory":("Mkdir","path"),
     "move_file":("Move","src"), "search_web":("Web","query"), "fetch_url":("Fetch","url"),
-    "change_directory":("CD","path"),
+    "change_directory":("CD","path"), "save_memory":("Memory+","key"), "delete_memory":("Memory-","key"),
 }
 
 def _rel(s: str) -> str:
@@ -491,17 +561,20 @@ SLASH_HELP = """[bold]Comandos disponibles:[/]
   [bold cyan]/cost[/]                    — estadísticas de uso local/groq
   [bold cyan]/critic [on|off][/]         — activa/desactiva modo Actor-Crítico
   [bold cyan]/ast[/]                     — muestra esqueleto AST del proyecto
-  [bold cyan]/plan [tarea][/]            — genera un plan antes de ejecutar"""
+  [bold cyan]/plan [tarea][/]            — genera un plan antes de ejecutar
+  [bold cyan]/dream[/]                   — extrae memorias valiosas de esta sesión
+  [bold cyan]/memory [list|forget KEY|clear][/] — gestiona memorias persistentes
+  [bold cyan]/compact[/]                 — compacta el contexto con resumen LLM"""
 
 
 # ── System Prompt ─────────────────────────────────────────────────────────────
-def build_system_prompt(work_dir: str, project_context: str) -> str:
+def build_system_prompt(work_dir: str, project_context: str, memories: str = "") -> str:
     desktop = str(Path.home() / "Desktop")
     return f"""Eres un agente autónomo de programación de nivel profesional. Directorio de trabajo: {work_dir}
 Escritorio del usuario: {desktop}
 
 {project_context}
-
+{memories}
 ═══════════════════════════════════════════════════════
 REGLA #0 — CUÁNDO NO USAR HERRAMIENTAS
 ═══════════════════════════════════════════════════════
@@ -719,6 +792,41 @@ class Agent:
                 return f"Antes de ejecutar nada, genera un plan detallado paso a paso para: {arg}. No ejecutes herramientas aún, solo el plan."
             else:
                 console.print(f"[{C_ERR}]  Uso: /plan [descripción de la tarea][/]")
+        elif c == "/dream":
+            self._dream()
+        elif c == "/memory":
+            mems = load_memories()
+            sub = arg.split(maxsplit=1)
+            if sub and sub[0] == "forget":
+                key = sub[1].strip() if len(sub) > 1 else ""
+                if not key:
+                    console.print(f"[{C_ERR}]  Uso: /memory forget [clave][/]")
+                else:
+                    deleted = False
+                    for cat in mems:
+                        if key in mems.get(cat, {}):
+                            r = delete_memory(key, cat)
+                            if "success" in r:
+                                console.print(f"[{C_OK}]  ✓ Eliminado: [{cat}] {key}[/]")
+                            else:
+                                console.print(f"[{C_ERR}]  ✗ {r.get('error','')}[/]")
+                            deleted = True; break
+                    if not deleted:
+                        console.print(f"[{C_ERR}]  '{key}' no encontrado[/]")
+            elif arg == "clear":
+                MEMORY_FILE.unlink(missing_ok=True)
+                console.print(f"[{C_OK}]  ✓ Todas las memorias eliminadas[/]")
+            else:
+                total = sum(len(v) for v in mems.values() if isinstance(v, dict))
+                if total == 0:
+                    console.print(f"[{C_DIM}]  Sin memorias guardadas. Usa /dream para extraer.[/]")
+                else:
+                    for cat, items in mems.items():
+                        if isinstance(items, dict):
+                            for k, v in items.items():
+                                console.print(f"  [{C_CRITIC}]{cat}[/]  [bold]{k}[/]: {v}")
+        elif c == "/compact":
+            self._compact_if_needed(force=True)
         else:
             console.print(f"[{C_ERR}]  Comando desconocido: {c}  (usa /help)[/]")
         return None
@@ -923,9 +1031,83 @@ No repitas lo que se hizo, solo señala problemas si los hay."""
         except Exception as e:
             console.print(f"[{C_DIM}]  (Crítico no disponible: {e})[/]")
 
+    def _dream(self) -> None:
+        """Extrae memorias valiosas de la sesión actual con un call LLM separado."""
+        if len(self.messages) < 5:
+            console.print(f"[{C_DIM}]  Sesión muy corta para extraer memorias.[/]")
+            return
+        console.print(f"[{C_CRITIC}]  💭 Extrayendo memorias de la sesión...[/]")
+        session_text = "\n".join(
+            f"[{m['role'].upper()}]: {str(m.get('content',''))[:400]}"
+            for m in self.messages[1:] if m.get("content")
+        )[-7000:]
+        dream_tools = [t for t in TOOLS if t["function"]["name"] == "save_memory"]
+        prompt = (f"Analiza esta sesión y extrae hasta 6 hechos valiosos para futuras sesiones.\n"
+                  f"Llama save_memory(key, value, category) por cada uno.\n"
+                  f"Categorías: facts (info del proyecto), patterns (cómo trabaja el usuario), "
+                  f"preferences (estilo preferido), bugs (bugs encontrados/resueltos).\n"
+                  f"Solo lo realmente útil para retomar el trabajo. Si no hay nada, no guardes.\n\n"
+                  f"Sesión:\n{session_text}")
+        try:
+            resp = self.local_client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                tools=dream_tools, temperature=0.1, max_tokens=1500, stream=False,
+            )
+            saved = 0
+            msg = resp.choices[0].message
+            if msg.tool_calls:
+                for tc in msg.tool_calls:
+                    if tc.function.name == "save_memory":
+                        try:
+                            args = json.loads(tc.function.arguments)
+                            r = save_memory(**args)
+                            if "success" in r:
+                                saved += 1
+                                console.print(f"[{C_DIM}]    · [{r['category']}] {r['key']}: {str(args.get('value',''))[:60]}[/]")
+                        except Exception:
+                            pass
+            console.print(f"[{C_OK}]  ✓ {saved} memorias guardadas[/]" if saved
+                          else f"[{C_DIM}]  Sin memorias valiosas en esta sesión.[/]")
+        except Exception as e:
+            console.print(f"[{C_ERR}]  ✗ Dream error: {e}[/]")
+
+    def _compact_if_needed(self, force: bool = False) -> None:
+        """Compacta el historial con resumen LLM si supera el umbral."""
+        if not force and len(self.messages) < COMPACT_THRESHOLD:
+            return
+        keep_recent = 8
+        to_summarize = self.messages[1:-keep_recent]
+        if not to_summarize:
+            return
+        console.print(f"[{C_DIM}]  ↻ Compactando {len(to_summarize)} msgs...[/]")
+        session_text = "\n".join(
+            f"[{m['role'].upper()}]: {str(m.get('content',''))[:300]}"
+            for m in to_summarize if m.get("content")
+        )[-6000:]
+        try:
+            resp = self.local_client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content":
+                    f"Resume en 350 tokens preservando: tareas completadas, archivos modificados, "
+                    f"decisiones tomadas, errores y soluciones encontradas. Solo hechos.\n\n{session_text}"}],
+                temperature=0.1, max_tokens=400, stream=False,
+            )
+            summary = resp.choices[0].message.content or ""
+            if summary:
+                self.messages = [
+                    self.messages[0],
+                    {"role": "system", "content": f"[SESIÓN COMPACTADA]\n{summary}"},
+                    *self.messages[-keep_recent:]
+                ]
+                console.print(f"[{C_OK}]  ✓ Contexto: {len(to_summarize)+keep_recent} → {len(self.messages)} msgs[/]")
+        except Exception as e:
+            console.print(f"[{C_ERR}]  ✗ Compact error: {e}[/]")
+
     def run(self):
         project_context = load_project_context(self.work_dir)
-        system_prompt = build_system_prompt(self.work_dir, project_context)
+        memories_text = format_memories(load_memories())
+        system_prompt = build_system_prompt(self.work_dir, project_context, memories_text)
         self.messages = [{"role": "system", "content": system_prompt}]
 
         self.logger.info("Sesión iniciada", extra={"tool_args": {
@@ -959,6 +1141,11 @@ No repitas lo que se hizo, solo señala problemas si los hay."""
                 console.print(f"[{C_OK}]  ✓ Sesión limpiada[/]")
                 continue
 
+            # Keyword mode detection (auto-activa modos especiales sin /slash)
+            mode, user_input = detect_keyword_mode(user_input)
+            if mode:
+                console.print(f"[{C_CRITIC}]  ⚡ Modo [{mode}] activado automáticamente[/]")
+
             # Router: decidir backend
             history_chars = sum(len(str(m.get("content",""))) for m in self.messages)
             backend, reason = self.router.route(user_input, history_chars)
@@ -973,6 +1160,7 @@ No repitas lo que se hizo, solo señala problemas si los hay."""
             heal_count = 0        # contador self-healing
             changed_files: list[str] = []  # para actor-crítico
             last_task = user_input
+            self._compact_if_needed()
 
             while True:
                 trimmed = self.messages[-80:]  # mantener últimos 80 mensajes
