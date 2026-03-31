@@ -1,9 +1,0 @@
-@echo off
-chcp 65001 >nul
-set OLLAMA_KEEP_ALIVE=-1
-set OLLAMA_NUM_GPU=999
-set CUDA_VISIBLE_DEVICES=0
-title Agente Local HERMES - dolphin-mistral:7b
-cls
-python "%~dp0..\..\src\agent.py" --model dolphin-mistral:7b --dir "%CD%" --tag HERMES --ctx 32768
-pause
