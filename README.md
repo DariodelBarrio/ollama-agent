@@ -1,64 +1,60 @@
-# 🧠 Ollama Agent — Agente de Programación Local
+# Ollama Agent — Agente de Programación Local
 
-Agente autónomo de programación que corre **100% local** con [Ollama](https://ollama.com). Replica las capacidades principales de asistentes como Claude Code sin conexión a internet ni costos de API.
+Agente autónomo de programación 100% local con [Ollama](https://ollama.com) y backend compatible con OpenAI. Réplica las capacidades principales de asistentes como Claude Code sin costos de API.
 
-![Python](https://img.shields.io/badge/Python-3.9+-blue) ![Ollama](https://img.shields.io/badge/Ollama-latest-green) ![CUDA](https://img.shields.io/badge/CUDA-12.x-76B900) ![License](https://img.shields.io/badge/license-MIT-blue)
+![Python](https://img.shields.io/badge/Python-3.9+-blue) ![OpenAI API](https://img.shields.io/badge/OpenAI--compatible-API-green) ![CUDA](https://img.shields.io/badge/CUDA-12.x-76B900) ![License](https://img.shields.io/badge/license-MIT-blue)
 
-![screenshot](docs/screenshot.png)
+---
 
+## Proyectos
 
+### `src/agent.py` — Agente local
 
-## Características
+Agente estándar que corre contra Ollama (o cualquier backend OpenAI-compatible).
 
-- **100% offline** — tu código nunca sale de tu equipo
-- **Cero costos** — sin facturación por tokens
-- **12 herramientas** — archivos, shell, web, grep, directorios, mover/renombrar
-- **Modo agente** — encadena pasos sin interrumpir, nunca pide confirmación entre herramientas
-- **Autocorrección** — si falla, analiza el error y reintenta hasta 3 veces con enfoque diferente
-- **Streaming** — respuestas en tiempo real con Rich UI
-- **Multi-modelo** — 9 modelos con bats preconfigurados
-- **GPU optimizada** — num_batch:512, contexto ajustado por tamaño de modelo para no derramar a RAM
-- **Modelos personalizados** — Modelfiles con reglas de comportamiento integradas permanentemente
-- **Proyectos reales** — web (React, Express, Vue), bases de datos (Prisma, Django, Alembic, SQL)
+**Características:**
+- 13 herramientas — archivos, shell, web, grep, directorios, mover/renombrar, cambio de directorio
+- Modos de trabajo: `/mode code` (temp 0.05) · `/mode architect` (0.7) · `/mode research` (0.3)
+- Streaming con detección de bloques `<think>` y `<thought>`
+- Autocorrección — reintenta hasta 3 veces con enfoque diferente ante errores
+- Menú interactivo de selección de modelo al arrancar
+- Compatible con Ollama, vLLM, LMDeploy y LM Studio vía `--api-base`
 
-## Modelos Disponibles
+### `IA/MEGA/agent.py` — Agente híbrido dual-brain
 
-### Con censura
+Agente avanzado con GPU local + Groq cloud. Router inteligente que decide el backend según la complejidad del prompt.
 
-| Tag | Modelo base | Modelo personalizado | Uso |
-|-----|-------------|----------------------|-----|
-| **SONNET** | `qwen3:14b` | `sonnet-agente` | Coding general, mejor all-rounder |
-| **OPUS** | `deepseek-r1:14b` | `opus-agente` | Razonamiento profundo, arquitectura |
-| **HAIKU** | `phi4:latest` | — | Matemáticas, lógica, razonamiento |
+**Características adicionales:**
+- SmartRouter — enruta automáticamente entre GPU local y Groq (128k ctx)
+- Actor-Crítico — revisa el código generado con un segundo pase (flag `--critic`)
+- Self-healing — inyecta contexto de error en el historial y reintenta hasta 3 veces
+- Comandos `/slash` — `/help`, `/clear`, `/switch`, `/model`, `/ctx`, `/scan`, `/stats`
+- Escáner AST — extrae esqueleto de clases, métodos y funciones del proyecto
+- Seguridad — bloquea comandos destructivos (`rm`, `del`, `format`, `shutdown`, etc.)
+- Rutas restringidas al work_dir — `change_directory` no puede salir del directorio raíz
+- `prompt_toolkit` — historial persistente y autocompletado en el prompt
 
-### Sin censura
-
-| Tag | Modelo | Uso |
-|-----|--------|-----|
-| **DOLPHIN** | `dolphin3:8b` | General, sin restricciones, rápido |
-| **HERMES** | `hermes3:8b` | General, sin restricciones, preciso |
-| **GROQ** | `llama3-groq-tool-use:8b` | Tool calling optimizado |
-| **DOLPHIN-HACKER** | `dolphin-hacker` | Pentesting, HTB, exploits |
-| **HERMES-HACKER** | `hermes-hacker` | Pentesting, HTB, exploits |
-
-> Los modelos `sonnet-agente` y `opus-agente` tienen las reglas de comportamiento y `/no_think` integrados permanentemente vía Modelfile. Construirlos con `config/CONSTRUIR MODELOS.bat`.
+---
 
 ## Herramientas
 
 | Herramienta | Descripción |
 |-------------|-------------|
-| `run_command` | Ejecuta PowerShell/CMD |
+| `run_command` | PowerShell / bash (filtra comandos destructivos en MEGA) |
 | `read_file` | Lee archivos con números de línea |
 | `write_file` | Crea archivos nuevos |
-| `edit_file` | Edita texto exacto en archivos |
+| `edit_file` | Edita texto exacto (soporta regex y replace_all) |
 | `find_files` | Busca por patrón glob |
 | `grep` | Busca texto/regex en el proyecto |
 | `list_directory` | Lista carpetas |
 | `delete_file` | Elimina archivos o carpetas (recursivo) |
 | `create_directory` | Crea carpetas y subcarpetas |
 | `move_file` | Mueve o renombra archivos/carpetas |
-| `search_web` | DuckDuckGo para info actual |
+| `change_directory` | Cambia el directorio de trabajo activo |
+| `search_web` | DuckDuckGo para información actual |
 | `fetch_url` | Descarga y lee URLs |
+
+---
 
 ## Requisitos
 
@@ -67,108 +63,147 @@ Agente autónomo de programación que corre **100% local** con [Ollama](https://
 - NVIDIA GPU con CUDA (recomendado, funciona en CPU)
 - Windows 10/11
 
+---
+
 ## Instalación
 
 ```bash
-# 1. Clonar repositorio
 git clone https://github.com/DariodelBarrio/ollama-agent.git
 cd ollama-agent
-
-# 2. Instalar dependencias Python
 pip install -r requirements.txt
-
-# 3. Descargar modelos base
-cd "IA\sin censura"
-"DESCARGAR MODELOS.bat"
-
-# 4. (Opcional) Construir modelos personalizados con reglas integradas
-config\CONSTRUIR MODELOS.bat
 ```
+
+Para MEGA (dependencias adicionales):
+
+```
+IA/MEGA/INSTALAR DEPENDENCIAS.bat
+```
+
+---
 
 ## Uso
 
-### Desde los accesos directos .bat
-
-```
-IA/
-├── con censura/
-│   ├── SONNET [qwen3 - Coding e inteligente].bat
-│   ├── OPUS [deepseek-r1 - Razonamiento profundo].bat
-│   └── HAIKU [phi4 - Razonamiento y matematicas].bat
-└── sin censura/
-    ├── DOLPHIN [dolphin3 - Sin censura rapido].bat
-    ├── HERMES [hermes3 - Sin censura preciso].bat
-    ├── GROQ [llama3-groq-tool-use - Herramientas optimizado].bat
-    ├── DOLPHIN-HACKER [HTB - Pentesting - Exploits].bat
-    └── HERMES-HACKER [HTB - Pentesting - Exploits].bat
-```
-
-### Desde línea de comandos
+### `src/agent.py`
 
 ```bash
-# Modelo por defecto
+# Menú interactivo de modelos
 python src/agent.py
 
 # Modelo y directorio específico
-python src/agent.py --model qwen3:14b --dir "C:\mi\proyecto"
+python src/agent.py --model qwen2.5-coder:14b --dir "C:\mi\proyecto"
 
-# Con contexto y temperatura personalizados
-python src/agent.py --model qwen3:14b --ctx 8192 --temp 0.1
-
-# Con nombre personalizado
-python src/agent.py --model hermes3:8b --tag "MI-AGENTE"
+# Backend alternativo (vLLM, LMDeploy, LM Studio)
+python src/agent.py --model mistral --api-base http://localhost:8000/v1
 ```
 
-### Argumentos CLI
+**Argumentos:**
 
 | Argumento | Default | Descripción |
 |-----------|---------|-------------|
-| `--model` | `qwen2.5-coder:7b` | Modelo Ollama a usar |
-| `--dir` | `.` | Directorio de trabajo del agente |
-| `--tag` | `AGENTE` | Nombre que aparece en el header |
+| `--model` | menú interactivo | Modelo a usar |
+| `--dir` | `.` | Directorio de trabajo |
+| `--tag` | `AGENTE` | Nombre en el header |
 | `--ctx` | `16384` | Ventana de contexto en tokens |
-| `--temp` | `0.15` | Temperatura (0.0 = determinista, 1.0 = creativo) |
+| `--temp` | `0.15` | Temperatura |
+| `--api-base` | `http://localhost:11434/v1` | URL base API (Ollama/vLLM/LMDeploy/LM Studio) |
 
-### Comandos de sesión
+**Comandos de sesión:**
 
 | Comando | Acción |
 |---------|--------|
 | `salir` / `exit` / `quit` | Termina el agente |
 | `limpiar` / `clear` / `reset` | Reinicia el historial |
+| `/mode [code\|architect\|research]` | Cambia el modo de trabajo |
 
-## Contexto por modelo y GPU
+### `IA/MEGA/agent.py`
 
-El contexto por defecto está ajustado para no exceder la VRAM disponible:
+```bash
+# Local GPU (Ollama)
+python agent.py --model qwen2.5-coder:14b --dir "C:\mi\proyecto"
 
-| Tamaño modelo | VRAM modelo | Contexto recomendado | KV cache aprox |
-|---------------|-------------|----------------------|----------------|
-| 7b / 8b | ~5 GB | 32768 (32K) | ~2 GB |
-| 14b | ~8.5 GB | 16384 (16K) | ~3 GB |
+# Forzar Groq cloud
+python agent.py --model llama-3.3-70b-versatile --backend groq
 
-Con GPU de 12 GB (RTX 5070/4070 Ti): los modelos 14b caben justo con 16K contexto.
-Usar 32K en 14b derrama el KV cache a RAM del sistema (lento).
-
-## Modelos Personalizados (Modelfiles)
-
-Los archivos en `config/` definen versiones personalizadas de los modelos con reglas y parámetros integrados:
-
-```
-config/
-├── Modelfile.sonnet       # qwen3:14b + /no_think + reglas de agente
-├── Modelfile.opus         # deepseek-r1:14b + /no_think + reglas de agente
-└── CONSTRUIR MODELOS.bat  # crea sonnet-agente y opus-agente con ollama create
+# Router automático + Actor-Crítico
+python agent.py --model qwen2.5-coder:14b --backend auto --critic
 ```
 
-Beneficio: aunque se llamen desde otra app o directamente con `ollama run sonnet-agente`, se comportan como agentes sin necesitar que el código Python les pase las instrucciones.
+**Argumentos:**
+
+| Argumento | Default | Descripción |
+|-----------|---------|-------------|
+| `--model` | menú interactivo | Modelo local o Groq |
+| `--dir` | `.` | Directorio de trabajo |
+| `--backend` | `auto` | `local`, `groq` o `auto` (router) |
+| `--local-url` | `http://localhost:11434/v1` | URL del servidor local |
+| `--groq-model` | `llama-3.3-70b-versatile` | Modelo de Groq |
+| `--ctx` | `32768` | Ventana de contexto |
+| `--temp` | `0.15` | Temperatura |
+| `--critic` | off | Activa modo Actor-Crítico |
+
+**Comandos /slash de MEGA:**
+
+| Comando | Acción |
+|---------|--------|
+| `/help` | Muestra todos los comandos |
+| `/clear` | Reinicia el historial |
+| `/switch [local\|groq\|auto]` | Fuerza o libera el backend |
+| `/model [nombre]` | Muestra o cambia el modelo activo |
+| `/ctx` | Muestra tokens de contexto usados |
+| `/scan` | Escanea la estructura AST del proyecto |
+| `/stats` | Estadísticas de llamadas al router |
+
+**Launchers .bat incluidos:**
+
+```
+IA/MEGA/
+├── SONNET [qwen2.5-coder - Coding RTX5070].bat
+├── OPUS [deepseek-r1 - Razonamiento profundo].bat
+├── CRITICO [qwen3 - Actor-Critico activado].bat
+├── GEMINI [gemini-2.0-flash - Nube inteligente].bat   ← ahora usa Groq
+└── INSTALAR DEPENDENCIAS.bat
+```
+
+Para usar Groq, define la API key (gratuita en [console.groq.com](https://console.groq.com)):
+
+```powershell
+setx GROQ_API_KEY tu_clave
+```
+
+---
+
+## Modelos recomendados
+
+### Local (RTX 5070 / 12 GB VRAM)
+
+| Modelo | VRAM | Uso |
+|--------|------|-----|
+| `qwen2.5-coder:14b` | ~8.5 GB | Mejor coder, todo en GPU |
+| `deepseek-r1:14b` | ~8.5 GB | Razonamiento profundo |
+| `qwen2.5-coder:32b` | ~12+7 GB RAM | Máxima calidad (offload parcial) |
+| `mistral-nemo:12b` | ~7.5 GB | General + multilingüe |
+| `dolphin3:8b` | ~5 GB | Sin censura, rápido |
+
+### Groq cloud (gratis)
+
+| Modelo | Contexto | Uso |
+|--------|----------|-----|
+| `llama-3.3-70b-versatile` | 128k | Más capaz, general |
+| `deepseek-r1-distill-llama-70b` | 128k | Thinking model |
+| `qwen-qwq-32b` | 128k | Alternativa razonamiento |
+| `llama-3.1-8b-instant` | 128k | Rápido, tareas simples |
+
+---
 
 ## Configuración GPU
 
-Variables de entorno (ya configuradas en los `.bat`):
+Variables de entorno (incluidas en los `.bat`):
 
 ```bash
-set OLLAMA_NUM_GPU=999       # todas las capas en GPU
-set OLLAMA_KEEP_ALIVE=-1     # modelo siempre cargado en VRAM
-set CUDA_VISIBLE_DEVICES=0   # GPU primaria
+set OLLAMA_NUM_GPU=999          # todas las capas en GPU
+set OLLAMA_KEEP_ALIVE=-1        # modelo siempre cargado en VRAM
+set CUDA_VISIBLE_DEVICES=0      # GPU primaria
+set OLLAMA_KV_CACHE_TYPE=q8_0   # KV cache cuantizado (mitad de VRAM)
 ```
 
 Para configurarlas permanentemente:
@@ -177,65 +212,63 @@ Para configurarlas permanentemente:
 setx OLLAMA_NUM_GPU 999
 setx OLLAMA_KEEP_ALIVE -1
 setx CUDA_VISIBLE_DEVICES 0
+setx OLLAMA_KV_CACHE_TYPE q8_0
 ```
 
-Verificar:
+---
 
-```bash
-ollama ps   # columna PROCESSOR debe mostrar 100% GPU
-```
+## Contexto por modelo y GPU
 
-## Parámetros de Modelo
+| Tamaño modelo | VRAM modelo | Contexto recomendado |
+|---------------|-------------|----------------------|
+| 7b / 8b | ~5 GB | 32768 (32K) |
+| 14b | ~8.5 GB | 8192–16384 |
+| 32b | ~12 GB + RAM | 8192 |
 
-| Parámetro | Valor | Efecto |
-|-----------|-------|--------|
-| `mirostat` | 2 | Muestreo adaptativo — coherencia superior a top_p fijo |
-| `mirostat_tau` | 5.0 | Entropía objetivo equilibrada para código |
-| `temperature` | 0.15 | Preciso sin ser robótico |
-| `num_ctx` | 16384 | 16K tokens — todo en VRAM para modelos 14b |
-| `num_batch` | 512 | Tokens por batch en GPU — mejora utilización |
-| `num_predict` | -1 | Sin límite de generación |
-| `repeat_penalty` | 1.05 | Evita repeticiones sin cortar creatividad |
+Con `OLLAMA_KV_CACHE_TYPE=q8_0` el KV cache ocupa la mitad — permite subir el contexto o liberar VRAM para el modelo.
 
-## Contexto de Proyecto
+---
 
-El agente carga automáticamente el primer archivo que encuentre en el directorio de trabajo:
-
-1. `CLAUDE.md` — instrucciones para Claude Code
-2. `README.md` — documentación del proyecto
-3. `.cursorrules` — reglas del editor Cursor
-
-## Estructura del Proyecto
+## Estructura del proyecto
 
 ```
 ollama-agent/
 ├── src/
-│   └── agent.py                        # Agente principal (12 tools, streaming, Rich UI)
+│   └── agent.py                  # Agente local (OpenAI-compatible API)
 ├── IA/
-│   ├── con censura/                    # Bats modelos estándar
-│   └── sin censura/                    # Bats modelos sin restricciones + hacker
+│   ├── MEGA/                     # Agente híbrido dual-brain
+│   │   ├── agent.py              # Local GPU + Groq, router, crítico, AST
+│   │   ├── SONNET *.bat
+│   │   ├── OPUS *.bat
+│   │   ├── CRITICO *.bat
+│   │   ├── GEMINI *.bat          # Groq cloud
+│   │   └── INSTALAR DEPENDENCIAS.bat
+│   └── sin censura/              # Bats modelos sin restricciones
 ├── config/
-│   ├── Modelfile.sonnet                # Modelo personalizado qwen3
-│   ├── Modelfile.opus                  # Modelo personalizado deepseek-r1
-│   └── CONSTRUIR MODELOS.bat           # Construye sonnet-agente y opus-agente
-├── scripts/
-│   └── generar_pdf.py
+│   ├── Modelfile.sonnet
+│   ├── Modelfile.opus
+│   └── CONSTRUIR MODELOS.bat
 ├── docs/
 │   └── screenshot.png
 ├── requirements.txt
 └── README.md
 ```
 
+---
+
 ## Dependencias
 
 ```
-ollama
+openai
 rich
+prompt_toolkit
 duckduckgo-search
 requests
 beautifulsoup4
-fpdf2
+pydantic
 ```
+
+---
 
 ## Licencia
 
