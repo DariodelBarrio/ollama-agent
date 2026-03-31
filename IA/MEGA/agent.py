@@ -736,11 +736,8 @@ class Agent:
             thought_buf: list[str] = []
             tc_accum: dict = {}
             buf = ""
+            json_mode = [False]  # True cuando el modelo emite el tool call como texto JSON
             for chunk in stream:
-                if first_output[0]:
-                    live.stop()
-                    console.print(f"\n[{C_BULLET}]●[/] [{C_ROUTER}]{self.router.icon(backend)}[/]  ", end="")
-                    first_output[0] = False
                 delta = chunk.choices[0].delta if chunk.choices else None
                 if not delta: continue
 
@@ -756,7 +753,22 @@ class Agent:
 
                 content = delta.content or ""
                 if not content: continue
+
+                if first_output[0]:
+                    live.stop()
+                    first_output[0] = False
+                    # Detectar si el modelo emite JSON en lugar de texto normal
+                    if (buf + content).lstrip().startswith(("{", "[")):
+                        json_mode[0] = True
+                    else:
+                        console.print(f"\n[{C_BULLET}]●[/] [{C_ROUTER}]{self.router.icon(backend)}[/]  ", end="")
+
                 buf += content
+                # En modo JSON: bufferear silenciosamente, sin imprimir ni parsear
+                if json_mode[0]:
+                    collected.append(content)
+                    continue
+
                 while True:
                     if state is None:
                         ti = buf.find("<think>"); thi = buf.find("<thought>")
@@ -794,7 +806,8 @@ class Agent:
                         buf = buf[i+8:]; state = None
                         console.print(f"\n[{C_BULLET}]●[/] ", end="")
             if buf.strip():
-                if state == "thought": thought_buf.append(buf)
+                if json_mode[0]: collected.append(buf)
+                elif state == "thought": thought_buf.append(buf)
                 elif state == "think": console.print(f"[{C_DIM}]{escape(buf)}[/]", end="")
                 else: console.print(_render_inline(buf), end=""); collected.append(buf)
             # Finalizar tool calls acumulados vía delta.tool_calls
@@ -808,7 +821,6 @@ class Agent:
             # Fallback: el modelo emitió el tool call como texto JSON en lugar de delta.tool_calls
             if not tool_calls_raw and collected:
                 raw_text = "".join(collected).strip()
-                # Detectar JSON de una o varias tool calls
                 candidates = []
                 if raw_text.startswith("["):
                     try: candidates = json.loads(raw_text)
@@ -828,7 +840,11 @@ class Agent:
                             "arguments": args,
                         })
                 if tool_calls_raw:
-                    collected.clear()  # no mostrar el JSON crudo como texto
+                    collected.clear()
+                elif json_mode[0]:
+                    # era JSON pero no válido como tool call — imprimir como texto normal
+                    console.print(f"\n[{C_BULLET}]●[/] [{C_ROUTER}]{self.router.icon(backend)}[/]  ", end="")
+                    console.print(_render_inline("".join(collected)), end="")
 
         with Live(Spinner("dots", text=f"[{C_ROUTER}]{self.router.icon(backend)}[/] Pensando... 0s"),
                   console=console, transient=True, refresh_per_second=4) as live:
