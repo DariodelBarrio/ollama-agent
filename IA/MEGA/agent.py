@@ -129,9 +129,11 @@ def _is_within_root(path: Path) -> bool:
 
 def _resolve(path: str) -> Path:
     p = Path(path)
-    resolved = (Path(WORK_DIR) / p).resolve() if not p.is_absolute() else p.resolve()
+    if p.is_absolute():
+        return p.resolve()  # rutas absolutas permitidas sin restricción
+    resolved = (Path(WORK_DIR) / p).resolve()
     if not _is_within_root(resolved):
-        raise ValueError(f"Ruta fuera del directorio permitido: {path}")
+        raise ValueError(f"Ruta relativa fuera del directorio permitido: {path}")
     return resolved
 
 def _is_safe_command(command: str) -> tuple[bool, str]:
