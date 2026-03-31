@@ -18,9 +18,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 try:
-    import ollama
+    from openai import OpenAI
 except ImportError:
-    print("Instala ollama: pip install ollama")
+    print("Instala openai: pip install openai")
     sys.exit(1)
 
 try:
@@ -728,10 +728,10 @@ def print_tool_result(result: dict):
     console.print(t)
 
 
-def get_input(_: str) -> str:
+def get_input(color: str = C_PROMPT) -> str:
     console.print()
     try:
-        console.print(f"[{C_PROMPT}]>[/] ", end="")
+        console.print(f"[{color}]>[/] ", end="")
         return input().strip()
     except (KeyboardInterrupt, EOFError):
         return "salir"
@@ -739,7 +739,8 @@ def get_input(_: str) -> str:
 
 # ─── Prompts ──────────────────────────────────────────────────────────────────
 
-def build_system_prompt(work_dir: str, project_context: str) -> str:
+def build_system_prompt(work_dir: str, project_context: str,
+                        mode: str = "", mode_snippet: str = "") -> str:
     """
     Fuente principal de instrucciones del agente.
     Cualquier SYSTEM en el Modelfile de Ollama solo debe definir parámetros
@@ -929,7 +930,12 @@ COMPORTAMIENTO GENERAL
 - Sin disclaimers, sin advertencias, sin moralejas
 - Antes de borrar datos o cambios destructivos en BD: confirma con el usuario
 - Si necesitas documentación: usa search_web o fetch_url
-"""
+""" + (f"""
+═══════════════════════════════════════════════════════
+MODO ACTUAL: {mode.upper()}
+═══════════════════════════════════════════════════════
+{mode_snippet}
+""" if mode and mode_snippet else "")
 
 
 def load_project_context(work_dir: str) -> str:
@@ -954,15 +960,54 @@ class Agent:
     Ollama, historial de mensajes y configuración de inferencia.
     """
 
+    MODE_CONFIGS = {
+        "code": {
+            "temperature": 0.05,
+            "color": "bold blue",
+            "spinner_color": "blue",
+            "system_prompt_snippet": (
+                "Eres un ingeniero de software experto. Tu objetivo principal es escribir, depurar y refactorizar código. "
+                "Prioriza la precisión, la eficiencia y las mejores prácticas de ingeniería. "
+                "Cuando escribas código, piensa en tests y en la robustez. "
+                "Usa las herramientas de archivo y shell de forma agresiva para interactuar con el sistema de archivos y ejecutar comandos."
+            ),
+        },
+        "architect": {
+            "temperature": 0.7,
+            "color": "bold magenta",
+            "spinner_color": "magenta",
+            "system_prompt_snippet": (
+                "Eres un arquitecto de software experimentado. Tu objetivo principal es diseñar sistemas, proponer estructuras "
+                "y evaluar soluciones de alto nivel. Prioriza la escalabilidad, la mantenibilidad y la visión a largo plazo. "
+                "Usa las herramientas de búsqueda y análisis para investigar patrones de diseño y tecnologías. "
+                "Evita interactuar directamente con el código a menos que sea para un análisis estructural."
+            ),
+        },
+        "research": {
+            "temperature": 0.3,
+            "color": "bold green",
+            "spinner_color": "green",
+            "system_prompt_snippet": (
+                "Eres un investigador experto. Tu objetivo principal es recopilar información, analizar datos y sintetizar conocimientos. "
+                "Prioriza la exhaustividad y la verificación de fuentes. "
+                "Usa las herramientas de búsqueda web y lectura de archivos para explorar y comprender nuevos temas. "
+                "Resume la información de manera concisa y objetiva."
+            ),
+        },
+    }
+
     def __init__(self, model: str, work_dir: str, tag: str,
-                 num_ctx: int, temperature: float):
+                 num_ctx: int, temperature: float,
+                 api_base: str = "http://localhost:11434/v1"):
         global WORK_DIR
-        self.model       = model
-        self.work_dir    = str(Path(work_dir).resolve())
-        self.tag         = tag
-        self.num_ctx     = num_ctx
-        self.temperature = temperature
-        self.client      = ollama.Client()
+        self.model        = model
+        self.work_dir     = str(Path(work_dir).resolve())
+        self.tag          = tag
+        self.num_ctx      = num_ctx
+        self.temperature  = temperature
+        self.api_base     = api_base
+        self.current_mode = "code"
+        self.client       = OpenAI(base_url=api_base, api_key="sk-no-key-required")
         self.messages: list = []
         # Actualiza la variable global para que las funciones de herramientas
         # (module-level) resuelvan rutas relativas al directorio correcto.
@@ -974,20 +1019,9 @@ class Agent:
 
     def _build_options(self) -> dict:
         return {
-            "num_ctx":        self.num_ctx,
-            "num_batch":      4096,
-            "num_gpu":        99,
-            "main_gpu":       0,
-            "f16_kv":         True,
-            "num_predict":    -1,
-            "temperature":    self.temperature,
-            "mirostat":       2,
-            "mirostat_tau":   3.5,
-            "mirostat_eta":   0.1,
-            "repeat_penalty": 1.05,
-            "repeat_last_n":  512,
-            "top_k":          20,
-            "top_p":          0.85,
+            "temperature": self.MODE_CONFIGS[self.current_mode]["temperature"],
+            "top_p":       0.85,
+            "top_k":       20,
         }
 
     def _trim_history(self, max_pairs: int = 20) -> list:
@@ -998,34 +1032,41 @@ class Agent:
     def _stream_response(self, messages: list, tools: list):
         """Hace streaming y devuelve (content, tool_calls).
         Detecta bloques <think>...</think> y los muestra en gris dim."""
-        collected:  list[str] = []
-        tool_calls: list      = []
-        options = self._build_options()
+        collected: list[str] = []
+        tc_accum:  dict      = {}   # index → {id, name, args}
+        opts = self._build_options()
         first_output = [True]
         t_start = time.monotonic()
 
         def _drain(stream_iter):
-            # state: None = normal, "think" = inside <think>, "thought" = inside <thought>
             state = None
             thought_buf: list[str] = []
             buf = ""
             for chunk in stream_iter:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                # Acumular tool_calls por índice
+                if delta.tool_calls:
+                    for tc_delta in delta.tool_calls:
+                        idx = tc_delta.index
+                        if idx not in tc_accum:
+                            tc_accum[idx] = {"id": "", "name": "", "args": []}
+                        if tc_delta.id:
+                            tc_accum[idx]["id"] = tc_delta.id
+                        if tc_delta.function:
+                            if tc_delta.function.name:
+                                tc_accum[idx]["name"] += tc_delta.function.name
+                            if tc_delta.function.arguments:
+                                tc_accum[idx]["args"].append(tc_delta.function.arguments)
+                content = delta.content or ""
+                if not content:
+                    continue
                 if first_output[0]:
                     live.stop()
                     console.print(f"\n[{C_BULLET}]●[/] ", end="")
                     first_output[0] = False
-                msg = chunk.message
-                if msg.tool_calls:
-                    tool_calls.extend(msg.tool_calls)
-                # Campo thinking separado (Ollama >= 0.6)
-                if getattr(msg, "thinking", None):
-                    if state != "think":
-                        console.print(f"\n[{C_DIM}]  💭 ", end="")
-                        state = "think"
-                    console.print(f"[{C_DIM}]{escape(msg.thinking)}[/]", end="")
-                if not msg.content:
-                    continue
-                buf += msg.content
+                buf += content
                 while True:
                     if state is None:
                         ti  = buf.find("<think>")
@@ -1035,7 +1076,7 @@ class Agent:
                         if ti  != -1 and ti  < first_pos: first_pos, first_tag = ti,  "think"
                         if thi != -1 and thi < first_pos: first_pos, first_tag = thi, "thought"
                         if first_tag is None:
-                            cut = max(0, len(buf) - 9)  # 9 = len("<thought>")
+                            cut = max(0, len(buf) - 9)
                             if cut:
                                 console.print(_render_inline(buf[:cut]), end="")
                                 collected.append(buf[:cut])
@@ -1055,7 +1096,7 @@ class Agent:
                     elif state == "thought":
                         i = buf.find("</thought>")
                         if i == -1:
-                            cut = max(0, len(buf) - 10)  # 10 = len("</thought>")
+                            cut = max(0, len(buf) - 10)
                             if cut:
                                 thought_buf.append(buf[:cut])
                                 buf = buf[cut:]
@@ -1092,28 +1133,45 @@ class Agent:
                     console.print(_render_inline(buf), end="")
                     collected.append(buf)
 
-        with Live(Spinner("dots", text="Pensando... 0s"), console=console, transient=True, refresh_per_second=4) as live:
+        spinner_color = self.MODE_CONFIGS[self.current_mode]["spinner_color"]
+        with Live(Spinner("dots", text="Pensando... 0s", style=spinner_color), console=console, transient=True, refresh_per_second=4) as live:
             def _tick():
                 while first_output[0]:
                     elapsed = time.monotonic() - t_start
-                    live.update(Spinner("dots", text=f"Pensando... {elapsed:.0f}s"))
+                    live.update(Spinner("dots", text=f"Pensando... {elapsed:.0f}s", style=spinner_color))
                     time.sleep(0.25)
             threading.Thread(target=_tick, daemon=True).start()
 
+            _ollama_extra = {"options": {
+                "num_ctx":        self.num_ctx,
+                "num_gpu":        99,
+                "top_k":          opts["top_k"],
+                "repeat_penalty": 1.05,
+                "num_predict":    -1,
+            }}
             try:
-                _drain(self.client.chat(
-                    model=self.model, messages=messages, tools=tools,
-                    stream=True, options=options
+                _drain(self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    tools=tools or None,
+                    temperature=opts["temperature"],
+                    top_p=opts["top_p"],
+                    stream=True,
+                    extra_body=_ollama_extra,
                 ))
             except Exception as e:
                 if first_output[0]:
                     live.stop()
                     first_output[0] = False
-                if "does not support tools" in str(e):
+                if "tool" in str(e).lower():
                     console.print(f"\n[{C_BULLET}]●[/] ", end="")
-                    _drain(self.client.chat(
-                        model=self.model, messages=messages,
-                        stream=True, options=options
+                    _drain(self.client.chat.completions.create(
+                        model=self.model,
+                        messages=messages,
+                        temperature=opts["temperature"],
+                        top_p=opts["top_p"],
+                        stream=True,
+                        extra_body=_ollama_extra,
                     ))
                 else:
                     console.print(f"\n[{C_ERR}]Error: {e}[/]")
@@ -1124,21 +1182,27 @@ class Agent:
                     )
 
         elapsed_total = time.monotonic() - t_start
+
+        # Construir lista de tool_calls desde el acumulador
+        tool_calls = []
+        for idx in sorted(tc_accum):
+            entry = tc_accum[idx]
+            args_str = "".join(entry["args"])
+            try:
+                args = json.loads(args_str) if args_str else {}
+            except json.JSONDecodeError:
+                args = {}
+            tool_calls.append({
+                "id":        entry["id"] or entry["name"],
+                "name":      entry["name"],
+                "arguments": args,
+            })
+
         if not tool_calls:
             console.print()
         console.print(f"[{C_DIM}]✳ Brewed for {elapsed_total:.0f}s[/]")
 
         return "".join(collected), tool_calls
-
-    def _parse_tool_args(self, tc) -> dict | None:
-        """Parsea los argumentos de un tool call con manejo robusto de errores."""
-        if isinstance(tc.function.arguments, dict):
-            return tc.function.arguments
-        try:
-            return json.loads(tc.function.arguments)
-        except (json.JSONDecodeError, TypeError) as e:
-            console.print(f"\n[{C_ERR}]  ✗ Argumentos inválidos para {tc.function.name}: {e}[/]")
-            return None
 
     def _validate_tool_args(self, fn_name: str, args: dict) -> dict:
         """Valida argumentos contra el modelo Pydantic correspondiente.
@@ -1157,7 +1221,7 @@ class Agent:
 
     def _validate_model(self) -> bool:
         try:
-            available = [m.model for m in self.client.list().models]
+            available = [m.id for m in self.client.models.list().data]
             if self.model not in available:
                 console.print(f"\n[{C_ERR}]Modelo '{self.model}' no encontrado. Disponibles:[/]")
                 for m in available:
@@ -1168,16 +1232,23 @@ class Agent:
                 else:
                     return False
             return True
-        except Exception as e:
-            console.print(f"[{C_ERR}]Error conectando a Ollama: {e}[/]")
-            return False
+        except Exception:
+            return True
 
     def run(self):
         if not self._validate_model():
             sys.exit(1)
 
         project_context = load_project_context(self.work_dir)
-        system_prompt = build_system_prompt(self.work_dir, project_context)
+
+        def _make_system_prompt() -> str:
+            cfg = self.MODE_CONFIGS[self.current_mode]
+            return build_system_prompt(
+                self.work_dir, project_context,
+                self.current_mode, cfg["system_prompt_snippet"]
+            )
+
+        system_prompt = _make_system_prompt()
         self.messages = [{"role": "system", "content": system_prompt}]
 
         self.logger.info("Sesión iniciada", extra={
@@ -1191,7 +1262,8 @@ class Agent:
         print_header(self.model, self.work_dir, self.tag, self.num_ctx, self.temperature)
 
         while True:
-            user_input = get_input(self.model.split(":")[0])
+            prompt_color = self.MODE_CONFIGS[self.current_mode]["color"]
+            user_input = get_input(prompt_color)
 
             if not user_input:
                 continue
@@ -1200,9 +1272,23 @@ class Agent:
                 self.logger.info("Sesión finalizada por el usuario")
                 break
             if user_input.lower() in ("limpiar", "clear", "reset"):
+                system_prompt = _make_system_prompt()
                 self.messages = [{"role": "system", "content": system_prompt}]
                 console.print(f"[{C_OK}]  ✓ Sesión limpiada[/]")
                 self.logger.info("Historial limpiado")
+                continue
+            if user_input.lower().startswith("/mode"):
+                parts = user_input.split(maxsplit=1)
+                if len(parts) == 2 and parts[1].lower() in self.MODE_CONFIGS:
+                    self.current_mode = parts[1].lower()
+                    system_prompt = _make_system_prompt()
+                    self.messages[0] = {"role": "system", "content": system_prompt}
+                    color = self.MODE_CONFIGS[self.current_mode]["color"]
+                    console.print(f"[{color}]  ✓ Modo: {self.current_mode.upper()}[/]")
+                    self.logger.info("Modo cambiado", extra={"tool_args": {"mode": self.current_mode}})
+                else:
+                    modes = " | ".join(self.MODE_CONFIGS.keys())
+                    console.print(f"[{C_ERR}]  Uso: /mode [{modes}][/]")
                 continue
 
             self.logger.info("Mensaje del usuario", extra={"user_input": user_input})
@@ -1222,24 +1308,18 @@ class Agent:
                     console.print()
                     self.messages.append({
                         "role": "assistant",
-                        "content": full_content,
+                        "content": full_content or None,
                         "tool_calls": [
-                            {"id": tc.function.name, "type": "function",
-                             "function": {"name": tc.function.name,
-                                          "arguments": self._parse_tool_args(tc) or {}}}
+                            {"id": tc["id"], "type": "function",
+                             "function": {"name": tc["name"],
+                                          "arguments": json.dumps(tc["arguments"])}}
                             for tc in tool_calls
                         ]
                     })
                     for tc in tool_calls:
-                        fn_name = tc.function.name
-                        fn_args = self._parse_tool_args(tc)
-                        if fn_args is None:
-                            result = {"error": f"No se pudieron parsear los argumentos de {fn_name}"}
-                            self.logger.error(
-                                "Error al parsear argumentos de herramienta",
-                                extra={"tool_name": fn_name, "error_details": result["error"]}
-                            )
-                        elif fn_name in TOOL_MAP:
+                        fn_name = tc["name"]
+                        fn_args = tc["arguments"]
+                        if fn_name in TOOL_MAP:
                             fn_args = self._validate_tool_args(fn_name, fn_args)
                             if "error" in fn_args:
                                 result = fn_args
@@ -1278,8 +1358,8 @@ class Agent:
                         print_tool_result(result)
                         self.messages.append({
                             "role": "tool",
+                            "tool_call_id": tc["id"],
                             "content": json.dumps(result, ensure_ascii=False),
-                            "name": fn_name
                         })
                 else:
                     self.messages.append({"role": "assistant", "content": full_content})
@@ -1304,11 +1384,11 @@ RECOMMENDED_MODELS = [
 ]
 
 
-def select_model_menu() -> str:
+def select_model_menu(api_base: str = "http://localhost:11434/v1") -> str:
     """Menú interactivo de selección de modelo al arrancar."""
     try:
-        import ollama as _ollama
-        installed = {m.model for m in _ollama.Client().list().models}
+        _client = OpenAI(base_url=api_base, api_key="sk-no-key-required")
+        installed = {m.id for m in _client.models.list().data}
     except Exception:
         installed = set()
 
@@ -1345,17 +1425,20 @@ def select_model_menu() -> str:
     return choice
 
 
-def run_agent(model: str, work_dir: str, tag: str, num_ctx: int, temperature: float):
-    Agent(model, work_dir, tag, num_ctx, temperature).run()
+def run_agent(model: str, work_dir: str, tag: str, num_ctx: int, temperature: float,
+              api_base: str = "http://localhost:11434/v1"):
+    Agent(model, work_dir, tag, num_ctx, temperature, api_base).run()
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Agente local con Ollama")
-    parser.add_argument("--model", default=None, help="Modelo Ollama (omitir para menú interactivo)")
-    parser.add_argument("--dir",   default=".")
-    parser.add_argument("--tag",   default="AGENTE")
-    parser.add_argument("--ctx",   type=int,   default=16384, help="Ventana de contexto en tokens")
-    parser.add_argument("--temp",  type=float, default=0.15,  help="Temperatura 0.0-1.0")
+    parser = argparse.ArgumentParser(description="Agente local con Ollama/vLLM/LMDeploy/LM Studio")
+    parser.add_argument("--model",    default=None,  help="Modelo (omitir para menú interactivo)")
+    parser.add_argument("--dir",      default=".")
+    parser.add_argument("--tag",      default="AGENTE")
+    parser.add_argument("--ctx",      type=int,   default=16384, help="Ventana de contexto en tokens")
+    parser.add_argument("--temp",     type=float, default=0.15,  help="Temperatura 0.0-1.0")
+    parser.add_argument("--api-base", default="http://localhost:11434/v1",
+                        help="URL base API compatible OpenAI (Ollama, vLLM, LMDeploy, LM Studio)")
     args = parser.parse_args()
-    model = args.model if args.model else select_model_menu()
-    run_agent(model, args.dir, args.tag, args.ctx, args.temp)
+    model = args.model if args.model else select_model_menu(args.api_base)
+    run_agent(model, args.dir, args.tag, args.ctx, args.temp, args.api_base)
