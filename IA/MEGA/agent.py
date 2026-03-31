@@ -749,7 +749,8 @@ class Agent:
                     for tc in delta.tool_calls:
                         idx = tc.index
                         if idx not in tc_accum:
-                            tc_accum[idx] = {"name": "", "arguments": ""}
+                            tc_accum[idx] = {"id": "", "name": "", "arguments": ""}
+                        if tc.id: tc_accum[idx]["id"] = tc.id
                         if tc.function.name: tc_accum[idx]["name"] += tc.function.name
                         if tc.function.arguments: tc_accum[idx]["arguments"] += tc.function.arguments
 
@@ -800,9 +801,9 @@ class Agent:
             for tc in tc_accum.values():
                 try:
                     args = json.loads(tc["arguments"]) if tc["arguments"] else {}
-                    tool_calls_raw.append({"name": tc["name"], "arguments": args})
+                    tool_calls_raw.append({"id": tc["id"] or tc["name"], "name": tc["name"], "arguments": args})
                 except json.JSONDecodeError:
-                    tool_calls_raw.append({"name": tc["name"], "arguments": {}})
+                    tool_calls_raw.append({"id": tc["id"] or tc["name"], "name": tc["name"], "arguments": {}})
 
             # Fallback: el modelo emitió el tool call como texto JSON en lugar de delta.tool_calls
             if not tool_calls_raw and collected:
