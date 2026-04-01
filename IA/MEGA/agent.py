@@ -1,4 +1,4 @@
-"""
+﻿"""
 Agente Híbrido Dual-Brain — MEGA Edition
 Motor: SGLang · vLLM · Ollama (RTX 5070 local) + Groq (nube)
 Router inteligente · Self-healing · Actor-Crítico · TUI profesional · Comandos /slash
@@ -6,10 +6,15 @@ Router inteligente · Self-healing · Actor-Crítico · TUI profesional · Coman
 Uso: python agent.py [--model MODEL] [--dir DIR] [--backend local|groq|auto]
      [--local-url URL] [--groq-model MODEL] [--ctx N] [--temp F] [--critic] [--tag TAG]
 """
-import json, os, re, sys, time, shutil, platform, argparse, threading, difflib, subprocess, logging, sqlite3
+import json, os, re, sys, time, argparse, threading, logging, sqlite3, inspect
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
 from typing import Optional
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from common_tools import WEB_AVAILABLE, ToolRuntime, build_tool_definitions
 
 try:
     from openai import OpenAI
@@ -39,57 +44,74 @@ except ImportError:
     PTOOLKIT = False
 
 try:
-    import requests
-    from bs4 import BeautifulSoup
-    from duckduckgo_search import DDGS
-    WEB_AVAILABLE = True
-except ImportError:
-    WEB_AVAILABLE = False
-
-try:
     import ast as _ast
     PYAST = True
 except ImportError:
     PYAST = False
 
 console = Console()
-_OS = platform.system()
 _SCRIPT_DIR = Path(__file__).parent
 
-# ── Colores ───────────────────────────────────────────────────────────────────
-C_PROMPT="#5B9BD5"; C_BULLET="#4EC9B0"; C_TOOL="#C586C0"; C_TOOLARG="#9CDCFE"
-C_OK="#6A9955"; C_ERR="#F44747"; C_DIM="#6E7681"; C_LOGO="#E8643B"
-C_BORDER="#30363D"; C_TEXT="#D4D4D4"; C_ROUTER="#FFD700"; C_CRITIC="#FF8C00"
+# Colores
+C_PROMPT = "#5B9BD5"
+C_BULLET = "#4EC9B0"
+C_TOOL = "#C586C0"
+C_TOOLARG = "#9CDCFE"
+C_OK = "#6A9955"
+C_ERR = "#F44747"
+C_DIM = "#6E7681"
+C_LOGO = "#E8643B"
+C_BORDER = "#30363D"
+C_TEXT = "#D4D4D4"
+C_ROUTER = "#FFD700"
+C_CRITIC = "#FF8C00"
 
-WORK_DIR = "."
-ROOT_DIR = str(Path(".").resolve())
 
-# ── Logging ───────────────────────────────────────────────────────────────────
 class _JsonFmt(logging.Formatter):
-    def format(self, r):
-        d = {"ts": datetime.fromtimestamp(r.created, tz=timezone.utc).isoformat(),
-             "level": r.levelname, "msg": r.getMessage()}
-        for k in ("user_input","assistant_response","tool_name","tool_args","tool_result","error_details"):
-            if hasattr(r, k): d[k] = getattr(r, k)
-        if r.exc_info: d["exc"] = self.formatException(r.exc_info)
-        return json.dumps(d, ensure_ascii=False)
+    def format(self, record):
+        payload = {
+            "ts": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
+            "level": record.levelname,
+            "msg": record.getMessage(),
+        }
+        for key in ("user_input", "assistant_response", "tool_name", "tool_args", "tool_result", "error_details"):
+            if hasattr(record, key):
+                payload[key] = getattr(record, key)
+        if record.exc_info:
+            payload["exc"] = self.formatException(record.exc_info)
+        return json.dumps(payload, ensure_ascii=False)
+
 
 def _make_logger(name, path):
-    lg = logging.getLogger(name); lg.setLevel(logging.DEBUG); lg.propagate = False
-    if not lg.handlers:
-        fh = logging.FileHandler(path, encoding="utf-8")
-        fh.setFormatter(_JsonFmt()); lg.addHandler(fh)
-    return lg
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    if not logger.handlers:
+        handler = logging.FileHandler(path, encoding="utf-8")
+        handler.setFormatter(_JsonFmt())
+        logger.addHandler(handler)
+    return logger
 
-# ── Smart Router ──────────────────────────────────────────────────────────────
+
+@contextmanager
+def _db_conn(db_path: Path):
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
+
+
 _CLOUD_PATTERNS = [
-    r'\b(architecture|design a system|review all|audit entire|comprehensive analysis)\b',
-    r'\b(toda la base|entire codebase|todo el proyecto|full project)\b',
-    r'\b(security audit|threat model|compare frameworks|explain everything)\b',
+    r"\b(architecture|design a system|review all|audit entire|comprehensive analysis)\b",
+    r"\b(toda la base|entire codebase|todo el proyecto|full project)\b",
+    r"\b(security audit|threat model|compare frameworks|explain everything)\b",
 ]
 
+
 class SmartRouter:
-    """Decide local GPU vs Groq cloud según complejidad del prompt y tamaño de contexto."""
     def __init__(self, ctx_threshold: int = 6000, force: Optional[str] = None):
         self.ctx_threshold = ctx_threshold
         self.force = force
@@ -97,218 +119,86 @@ class SmartRouter:
 
     def route(self, prompt: str, history_chars: int) -> tuple[str, str]:
         if self.force:
-            return self.force, f"forzado (/switch)"
+            return self.force, "forzado (/switch)"
         est_tokens = history_chars // 4
         if est_tokens > self.ctx_threshold:
             return "groq", f"contexto ~{est_tokens}t > umbral {self.ctx_threshold}t"
-        for p in _CLOUD_PATTERNS:
-            if re.search(p, prompt, re.I):
+        for pattern in _CLOUD_PATTERNS:
+            if re.search(pattern, prompt, re.I):
                 return "groq", "tarea compleja/arquitectural detectada"
         return "local", "tarea coding/local"
 
-    def icon(self, b: str) -> str:
-        return {"local": "⚡ LOCAL", "groq": "☁  GROQ"}.get(b, b)
+    def icon(self, backend: str) -> str:
+        return {"local": "⚡ LOCAL", "groq": "☁  GROQ"}.get(backend, backend)
 
-    def record(self, b: str):
-        if b in self.calls: self.calls[b] += 1
+    def record(self, backend: str):
+        if backend in self.calls:
+            self.calls[backend] += 1
 
     def stats(self) -> str:
         return f"local:{self.calls['local']}  groq:{self.calls['groq']}"
 
+# Herramientas compartidas
+WORK_DIR = "."
+ROOT_DIR = str(Path(".").resolve())
+_TOOL_RUNTIME = ToolRuntime(WORK_DIR, ROOT_DIR)
 
-# ── Herramientas ─────────────────────────────────────────────────────────────
-def _root() -> Path:
-    return Path(ROOT_DIR).resolve()
+
+def _sync_tool_runtime() -> None:
+    _TOOL_RUNTIME.set_workspace(WORK_DIR, ROOT_DIR)
+
+
+def _sync_tool_globals() -> None:
+    global WORK_DIR, ROOT_DIR
+    WORK_DIR = _TOOL_RUNTIME.work_dir
+    ROOT_DIR = _TOOL_RUNTIME.root_dir
+
 
 def _is_within_root(path: Path) -> bool:
+    _sync_tool_runtime()
     try:
-        path.resolve().relative_to(_root())
+        path.resolve().relative_to(Path(ROOT_DIR).resolve())
         return True
     except ValueError:
         return False
 
+
+def _wrap_tool(method_name: str):
+    method = getattr(_TOOL_RUNTIME, method_name)
+
+    @wraps(method)
+    def _wrapped(*args, **kwargs):
+        _sync_tool_runtime()
+        result = getattr(_TOOL_RUNTIME, method_name)(*args, **kwargs)
+        _sync_tool_globals()
+        return result
+
+    return _wrapped
+
+
 def _resolve(path: str) -> Path:
-    p = Path(path)
-    if p.is_absolute():
-        return p.resolve()  # rutas absolutas permitidas sin restricción
-    resolved = (Path(WORK_DIR) / p).resolve()
-    if not _is_within_root(resolved):
-        raise ValueError(f"Ruta relativa fuera del directorio permitido: {path}")
+    _sync_tool_runtime()
+    resolved = _TOOL_RUNTIME.resolve(path)
+    _sync_tool_globals()
     return resolved
 
-def _is_safe_command(command: str) -> tuple[bool, str]:
-    lowered = command.lower()
-    blocked_patterns = [
-        r'(^|\s)(rm|rmdir|del|erase)\s',
-        r'remove-item\b',
-        r'format\b',
-        r'reg\s+(delete|add)\b',
-        r'shutdown\b',
-        r'reboot\b',
-        r'poweroff\b',
-        r'mkfs\b',
-        r'diskpart\b',
-        r'chmod\s+777\b',
-        r'curl\b.*\|',
-        r'invoke-webrequest\b.*\|',
-    ]
-    for pattern in blocked_patterns:
-        if re.search(pattern, lowered):
-            return False, "Comando bloqueado por seguridad"
-    return True, ""
 
-def run_command(command: str, shell: str = "auto", timeout: int = 60) -> dict:
-    try:
-        ok, reason = _is_safe_command(command)
-        if not ok:
-            return {"error": reason}
-        eff = shell if shell != "auto" else ("powershell" if _OS == "Windows" else "bash")
-        if eff == "powershell":  cmd = ["powershell", "-NoProfile", "-Command", command]
-        elif eff == "bash":      cmd = ["bash", "-c", command]
-        elif eff == "sh":        cmd = ["sh", "-c", command]
-        else:
-            r = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=timeout, cwd=WORK_DIR)
-            return {"stdout": r.stdout.strip(), "stderr": r.stderr.strip(), "returncode": r.returncode}
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=WORK_DIR)
-        return {"stdout": r.stdout.strip(), "stderr": r.stderr.strip(), "returncode": r.returncode}
-    except subprocess.TimeoutExpired: return {"error": f"Timeout {timeout}s"}
-    except Exception as e: return {"error": str(e)}
-
-def read_file(path: str) -> dict:
-    try:
-        p = _resolve(path)
-        if not p.exists(): return {"error": f"No encontrado: {path}"}
-        if p.stat().st_size > 2_000_000: return {"error": "Archivo >2MB"}
-        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
-        return {"content": "\n".join(f"{i+1:4}: {l}" for i, l in enumerate(lines)),
-                "path": str(p), "lines": len(lines)}
-    except Exception as e: return {"error": str(e)}
-
-def write_file(path: str, content: str) -> dict:
-    try:
-        p = _resolve(path); p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content, encoding="utf-8")
-        return {"success": True, "path": str(p), "lines": len(content.splitlines())}
-    except Exception as e: return {"error": str(e)}
-
-def edit_file(path: str, old_text: str, new_text: str,
-              replace_all: bool = False, use_regex: bool = False) -> dict:
-    try:
-        p = _resolve(path)
-        if not p.exists(): return {"error": f"No encontrado: {path}"}
-        content = p.read_text(encoding="utf-8", errors="replace")
-        if use_regex:
-            try: pat = re.compile(old_text, re.MULTILINE)
-            except re.error as e: return {"error": f"Regex: {e}"}
-            if not pat.search(content): return {"error": "Patrón regex no encontrado"}
-            count = len(pat.findall(content))
-            nc = pat.sub(new_text, content) if replace_all else pat.sub(new_text, content, 1)
-        else:
-            if old_text not in content:
-                return {"error": "Texto no encontrado (debe ser exacto, incluyendo espacios)"}
-            count = content.count(old_text)
-            nc = content.replace(old_text, new_text) if replace_all else content.replace(old_text, new_text, 1)
-        old_l = content.splitlines(keepends=True); new_l = nc.splitlines(keepends=True)
-        raw = list(difflib.unified_diff(old_l, new_l, n=2))
-        entries = []; la = lr = ol = nl = 0
-        for dl in raw:
-            if dl.startswith("@@"):
-                m = re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", dl)
-                if m: ol, nl = int(m.group(1)), int(m.group(2))
-            elif dl.startswith(("---", "+++")): continue
-            elif dl.startswith("-"): entries.append((ol, "removed", dl[1:].rstrip("\n"))); ol += 1; lr += 1
-            elif dl.startswith("+"): entries.append((nl, "added", dl[1:].rstrip("\n"))); nl += 1; la += 1
-            elif dl.startswith(" "): entries.append((ol, "context", dl[1:].rstrip("\n"))); ol += 1; nl += 1
-        p.write_text(nc, encoding="utf-8")
-        return {"success": True, "path": str(p), "replaced": count if replace_all else 1,
-                "added": la, "removed": lr, "diff": entries[:30]}
-    except Exception as e: return {"error": str(e)}
-
-def find_files(pattern: str, path: str = ".") -> dict:
-    try:
-        p = _resolve(path)
-        return {"pattern": pattern, "files": [str(f.relative_to(p)) for f in sorted(p.glob(pattern)) if f.is_file()][:50]}
-    except Exception as e: return {"error": str(e)}
-
-def grep(pattern: str, path: str = ".", extension: str = "") -> dict:
-    try:
-        p = _resolve(path); results = []
-        try: rx = re.compile(pattern, re.IGNORECASE)
-        except re.error as e: return {"error": f"Regex: {e}"}
-        for f in sorted(p.glob(f"**/*{extension}" if extension else "**/*")):
-            if not f.is_file() or f.stat().st_size > 1_000_000: continue
-            try:
-                for i, line in enumerate(f.read_text(encoding="utf-8", errors="replace").splitlines()):
-                    if rx.search(line):
-                        results.append({"file": str(f.relative_to(p)), "line": i+1, "content": line.strip()})
-                    if len(results) >= 50: break
-            except: pass
-            if len(results) >= 50: break
-        return {"pattern": pattern, "results": results}
-    except Exception as e: return {"error": str(e)}
-
-def list_directory(path: str = ".") -> dict:
-    try:
-        p = _resolve(path)
-        if not p.exists(): return {"error": f"No encontrado: {path}"}
-        return {"path": str(p), "entries": [
-            {"name": i.name, "type": "dir" if i.is_dir() else "file",
-             "size": i.stat().st_size if i.is_file() else None}
-            for i in sorted(p.iterdir())]}
-    except Exception as e: return {"error": str(e)}
-
-def delete_file(path: str) -> dict:
-    try:
-        p = _resolve(path)
-        if not p.exists(): return {"error": f"No existe: {path}"}
-        shutil.rmtree(p) if p.is_dir() else p.unlink()
-        return {"success": True, "deleted": str(p)}
-    except Exception as e: return {"error": str(e)}
-
-def create_directory(path: str) -> dict:
-    try:
-        p = _resolve(path); p.mkdir(parents=True, exist_ok=True)
-        return {"success": True, "path": str(p)}
-    except Exception as e: return {"error": str(e)}
-
-def move_file(src: str, dst: str) -> dict:
-    try:
-        s = _resolve(src); d = _resolve(dst)
-        if not s.exists(): return {"error": f"No existe: {src}"}
-        d.parent.mkdir(parents=True, exist_ok=True); shutil.move(str(s), str(d))
-        return {"success": True, "from": str(s), "to": str(d)}
-    except Exception as e: return {"error": str(e)}
-
-def search_web(query: str, max_results: int = 5) -> dict:
-    if not WEB_AVAILABLE: return {"error": "pip install duckduckgo-search requests beautifulsoup4"}
-    try:
-        with DDGS() as d: results = list(d.text(query, max_results=max_results))
-        return {"query": query, "results": [{"title": r.get("title",""), "url": r.get("href",""),
-                "snippet": r.get("body","")} for r in results]}
-    except Exception as e: return {"error": str(e)}
-
-def fetch_url(url: str, max_chars: int = 4000) -> dict:
-    if not WEB_AVAILABLE: return {"error": "pip install requests beautifulsoup4"}
-    try:
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-        r.raise_for_status()
-        soup = BeautifulSoup(r.text, "html.parser")
-        for t in soup(["script","style","nav","footer","header","aside"]): t.decompose()
-        text = " ".join(soup.get_text(separator=" ").split())
-        return {"url": url, "content": text[:max_chars] + ("…" if len(text)>max_chars else ""), "chars": len(text)}
-    except Exception as e: return {"error": str(e)}
-
-def change_directory(path: str) -> dict:
-    global WORK_DIR
-    try:
-        p = _resolve(path)
-        if not p.exists(): return {"error": f"No existe: {path}"}
-        if not p.is_dir(): return {"error": f"No es directorio: {path}"}
-        WORK_DIR = str(p); return {"success": True, "cwd": str(p)}
-    except Exception as e: return {"error": str(e)}
+run_command = _wrap_tool("run_command")
+read_file = _wrap_tool("read_file")
+write_file = _wrap_tool("write_file")
+edit_file = _wrap_tool("edit_file")
+find_files = _wrap_tool("find_files")
+grep = _wrap_tool("grep")
+list_directory = _wrap_tool("list_directory")
+delete_file = _wrap_tool("delete_file")
+create_directory = _wrap_tool("create_directory")
+move_file = _wrap_tool("move_file")
+search_web = _wrap_tool("search_web")
+fetch_url = _wrap_tool("fetch_url")
+change_directory = _wrap_tool("change_directory")
 
 
-# ── Memoria Persistente SQLite + FTS5 ────────────────────────────────────────
+# Memoria Persistente SQLite + FTS5 ────────────────────────────────────────
 COMPACT_THRESHOLD = 50
 
 class MemoryDB:
@@ -322,7 +212,7 @@ class MemoryDB:
         self._migrate_json()
 
     def _init(self):
-        with sqlite3.connect(self.db_path) as c:
+        with _db_conn(self.db_path) as c:
             c.executescript("""
                 CREATE TABLE IF NOT EXISTS memories (
                     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -366,10 +256,10 @@ class MemoryDB:
     def save(self, key: str, value: str, category: str = "fact",
              importance: int = 5, tags: str = "") -> dict:
         try:
-            with sqlite3.connect(self.db_path) as c:
+            with _db_conn(self.db_path) as c:
                 c.execute("""
-                    INSERT INTO memories(key,value,category,tags,importance,updated_at)
-                    VALUES(?,?,?,?,?,unixepoch('now'))
+                    INSERT INTO memories(key,value,category,tags,importance,created_at,updated_at)
+                    VALUES(?,?,?,?,?,unixepoch('now'),unixepoch('now'))
                     ON CONFLICT(key,category) DO UPDATE SET
                         value=excluded.value, tags=excluded.tags,
                         importance=excluded.importance, updated_at=unixepoch('now')
@@ -380,7 +270,7 @@ class MemoryDB:
 
     def search(self, query: str, limit: int = 5) -> list:
         try:
-            with sqlite3.connect(self.db_path) as c:
+            with _db_conn(self.db_path) as c:
                 rows = c.execute("""
                     SELECT m.key, m.value, m.category, m.importance
                     FROM memories_fts f
@@ -401,7 +291,7 @@ class MemoryDB:
 
     def delete(self, key: str, category: str = "fact") -> dict:
         try:
-            with sqlite3.connect(self.db_path) as c:
+            with _db_conn(self.db_path) as c:
                 n = c.execute(
                     "DELETE FROM memories WHERE key=? AND category=?", (key, category)
                 ).rowcount
@@ -412,7 +302,7 @@ class MemoryDB:
     def top(self, limit: int = 12) -> list:
         """Memorias más importantes para inyectar en el system prompt."""
         try:
-            with sqlite3.connect(self.db_path) as c:
+            with _db_conn(self.db_path) as c:
                 rows = c.execute("""
                     SELECT key, value, category, importance
                     FROM memories
@@ -426,7 +316,7 @@ class MemoryDB:
 
     def list_all(self, category: str = "") -> list:
         try:
-            with sqlite3.connect(self.db_path) as c:
+            with _db_conn(self.db_path) as c:
                 if category:
                     rows = c.execute(
                         "SELECT key,value,category,importance FROM memories WHERE category=? ORDER BY importance DESC,updated_at DESC",
@@ -501,25 +391,14 @@ TOOL_MAP = {
     "save_memory": save_memory, "memory_search": memory_search, "delete_memory": delete_memory,
 }
 
-TOOLS = [
-    {"type":"function","function":{"name":"run_command","description":"Ejecuta comandos en shell (auto: powershell/bash).","parameters":{"type":"object","properties":{"command":{"type":"string"},"shell":{"type":"string","enum":["auto","powershell","bash","sh","cmd"]},"timeout":{"type":"integer"}},"required":["command"]}}},
-    {"type":"function","function":{"name":"read_file","description":"Lee un archivo con números de línea.","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}},
-    {"type":"function","function":{"name":"write_file","description":"Crea un archivo nuevo.","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}}},
-    {"type":"function","function":{"name":"edit_file","description":"Edita texto en archivo. SIEMPRE usa read_file primero. Prohibido reescribir archivos enteros.","parameters":{"type":"object","properties":{"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"},"replace_all":{"type":"boolean"},"use_regex":{"type":"boolean"}},"required":["path","old_text","new_text"]}}},
-    {"type":"function","function":{"name":"find_files","description":"Busca archivos por glob.","parameters":{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern"]}}},
-    {"type":"function","function":{"name":"grep","description":"Busca texto/regex en el proyecto.","parameters":{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"extension":{"type":"string"}},"required":["pattern"]}}},
-    {"type":"function","function":{"name":"list_directory","description":"Lista carpeta.","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":[]}}},
-    {"type":"function","function":{"name":"delete_file","description":"Elimina archivo o carpeta.","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}},
-    {"type":"function","function":{"name":"create_directory","description":"Crea carpeta.","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}},
-    {"type":"function","function":{"name":"move_file","description":"Mueve o renombra.","parameters":{"type":"object","properties":{"src":{"type":"string"},"dst":{"type":"string"}},"required":["src","dst"]}}},
-    {"type":"function","function":{"name":"change_directory","description":"Cambia directorio de trabajo activo.","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}},
-    {"type":"function","function":{"name":"save_memory","description":"Guarda un hecho duradero en memoria persistente SQLite entre sesiones. Usa para preferencias, patrones de código, decisiones de arquitectura, bugs conocidos.","parameters":{"type":"object","properties":{"key":{"type":"string","description":"Identificador corto en snake_case"},"value":{"type":"string","description":"Descripción concisa del hecho a recordar"},"category":{"type":"string","enum":["fact","pattern","preference","bug","project"],"description":"Categoría de la memoria"},"importance":{"type":"integer","description":"Importancia 1-10 (10=crítico). Default 5."}},"required":["key","value"]}}},
-    {"type":"function","function":{"name":"memory_search","description":"Busca en la memoria persistente por texto. Usa full-text search para encontrar memorias relevantes al contexto actual.","parameters":{"type":"object","properties":{"query":{"type":"string","description":"Términos a buscar"},"limit":{"type":"integer","description":"Máximo de resultados (default 5)"}},"required":["query"]}}},
-    {"type":"function","function":{"name":"delete_memory","description":"Elimina una memoria guardada.","parameters":{"type":"object","properties":{"key":{"type":"string"},"category":{"type":"string","enum":["fact","pattern","preference","bug","project"]}},"required":["key"]}}},
-] + ([
-    {"type":"function","function":{"name":"search_web","description":"Busca en internet con DuckDuckGo.","parameters":{"type":"object","properties":{"query":{"type":"string"},"max_results":{"type":"integer"}},"required":["query"]}}},
-    {"type":"function","function":{"name":"fetch_url","description":"Descarga y lee el contenido de una URL.","parameters":{"type":"object","properties":{"url":{"type":"string"},"max_chars":{"type":"integer"}},"required":["url"]}}},
-] if WEB_AVAILABLE else [])
+TOOLS = build_tool_definitions(
+    include_web=True,
+    extra_tools=[
+        {"type":"function","function":{"name":"save_memory","description":"Guarda un hecho duradero en memoria persistente SQLite entre sesiones. Usa para preferencias, patrones de código, decisiones de arquitectura, bugs conocidos.","parameters":{"type":"object","properties":{"key":{"type":"string","description":"Identificador corto en snake_case"},"value":{"type":"string","description":"Descripción concisa del hecho a recordar"},"category":{"type":"string","enum":["fact","pattern","preference","bug","project"],"description":"Categoría de la memoria"},"importance":{"type":"integer","description":"Importancia 1-10 (10=crítico). Default 5."}},"required":["key","value"]}}},
+        {"type":"function","function":{"name":"memory_search","description":"Busca en la memoria persistente por texto. Usa full-text search para encontrar memorias relevantes al contexto actual.","parameters":{"type":"object","properties":{"query":{"type":"string","description":"Términos a buscar"},"limit":{"type":"integer","description":"Máximo de resultados (default 5)"}},"required":["query"]}}},
+        {"type":"function","function":{"name":"delete_memory","description":"Elimina una memoria guardada.","parameters":{"type":"object","properties":{"key":{"type":"string"},"category":{"type":"string","enum":["fact","pattern","preference","bug","project"]}},"required":["key"]}}},
+    ],
+)
 
 
 # ── AST Scanner (Fase 5) ──────────────────────────────────────────────────────
@@ -785,7 +664,8 @@ def load_project_context(work_dir: str) -> str:
 # ── Clase Agent ───────────────────────────────────────────────────────────────
 class Agent:
     def __init__(self, model: str, work_dir: str, tag: str, ctx: int, temp: float,
-                 local_url: str, groq_model: str, backend: str, critic: bool):
+                 local_url: str, groq_model: str, backend: str, critic: bool,
+                 system_prompt_path: Optional[str] = None):
         global WORK_DIR, ROOT_DIR, _mem
         self.model      = model
         self.work_dir   = str(Path(work_dir).resolve())
@@ -796,6 +676,7 @@ class Agent:
         self.groq_model = groq_model
         self.critic     = critic
         self.messages: list = []
+        self.system_prompt_path = Path(system_prompt_path).resolve() if system_prompt_path else None
         WORK_DIR = self.work_dir
         ROOT_DIR = self.work_dir
         self.selected_backend = backend if backend != "auto" else None
@@ -829,6 +710,18 @@ class Agent:
             )
         else:
             self.pt_session = None
+
+    def _read_system_prompt_override(self) -> Optional[str]:
+        if not self.system_prompt_path:
+            return None
+        try:
+            return self.system_prompt_path.read_text(encoding="utf-8")
+        except Exception as e:
+            self.logger.error(
+                "No se pudo leer el prompt externo",
+                extra={"error_details": str(e)}
+            )
+            return None
 
     def _client_for(self, backend: str):
         if backend == "groq" and self.groq_client:
@@ -942,7 +835,7 @@ class Agent:
                     else:
                         console.print(f"[{C_DIM}]  Sin resultados para: {q}[/]")
             elif arg == "clear":
-                with sqlite3.connect(self.memdb.db_path) as c_:
+                with _db_conn(self.memdb.db_path) as c_:
                     c_.execute("DELETE FROM memories")
                 console.print(f"[{C_OK}]  ✓ Todas las memorias eliminadas[/]")
             else:
@@ -1158,6 +1051,26 @@ No repitas lo que se hizo, solo señala problemas si los hay."""
         except Exception as e:
             console.print(f"[{C_DIM}]  (Crítico no disponible: {e})[/]")
 
+    def _validate_tool_args(self, fn_name: str, args: dict) -> dict:
+        fn = TOOL_MAP[fn_name]
+        try:
+            bound = inspect.signature(fn).bind(**args)
+            bound.apply_defaults()
+            return dict(bound.arguments)
+        except TypeError as e:
+            return {"error": f"Argumentos inválidos para '{fn_name}': {e}"}
+
+    def _invoke_tool(self, fn_name: str, fn_args: dict) -> dict:
+        try:
+            return TOOL_MAP[fn_name](**fn_args)
+        except Exception as e:
+            self.logger.error(
+                "Excepción en herramienta",
+                extra={"tool_name": fn_name, "error_details": str(e)},
+                exc_info=True
+            )
+            return {"error": f"Excepción ejecutando '{fn_name}': {e}"}
+
     def _dream(self) -> None:
         """Extrae memorias valiosas de la sesión actual con un call LLM separado."""
         if len(self.messages) < 5:
@@ -1232,9 +1145,26 @@ No repitas lo que se hizo, solo señala problemas si los hay."""
             console.print(f"[{C_ERR}]  ✗ Compact error: {e}[/]")
 
     def run(self):
-        project_context = load_project_context(self.work_dir)
-        memories_text = self.memdb.format_for_prompt()
-        system_prompt = build_system_prompt(self.work_dir, project_context, memories_text)
+        def _make_system_prompt() -> str:
+            project_context = load_project_context(self.work_dir)
+            memories_text = self.memdb.format_for_prompt()
+            override = self._read_system_prompt_override()
+            if override:
+                try:
+                    return override.format(
+                        work_dir=self.work_dir,
+                        project_context=project_context,
+                        memories=memories_text,
+                    )
+                except Exception as e:
+                    self.logger.error(
+                        "Falló el formateo del prompt externo",
+                        extra={"error_details": str(e)}
+                    )
+                    return override
+            return build_system_prompt(self.work_dir, project_context, memories_text)
+
+        system_prompt = _make_system_prompt()
         self.messages = [{"role": "system", "content": system_prompt}]
 
         self.logger.info("Sesión iniciada", extra={"tool_args": {
@@ -1252,6 +1182,8 @@ No repitas lo que se hizo, solo señala problemas si los hay."""
 
             # Comandos /slash
             if user_input.startswith("/"):
+                if user_input.split(maxsplit=1)[0].lower() == "/clear":
+                    system_prompt = _make_system_prompt()
                 result = self._handle_slash(user_input, system_prompt)
                 if result == "break": break
                 if result:  # /plan devuelve prompt modificado
@@ -1264,6 +1196,7 @@ No repitas lo que se hizo, solo señala problemas si los hay."""
                 self.logger.info("Sesión finalizada")
                 break
             if user_input.lower() in ("limpiar", "clear", "reset"):
+                system_prompt = _make_system_prompt()
                 self.messages = [{"role": "system", "content": system_prompt}]
                 console.print(f"[{C_OK}]  ✓ Sesión limpiada[/]")
                 continue
@@ -1310,25 +1243,34 @@ No repitas lo que se hizo, solo señala problemas si los hay."""
                         fn_name = tc["name"]; fn_args = tc["arguments"]
                         if not isinstance(fn_args, dict): fn_args = {}
                         if fn_name in TOOL_MAP:
-                            print_tool_call(fn_name, fn_args)
-                            result = TOOL_MAP[fn_name](**fn_args)
-                            print_tool_result(result)
+                            fn_args = self._validate_tool_args(fn_name, fn_args)
+                            if "error" in fn_args:
+                                result = fn_args
+                                print_tool_result(result)
+                                self.logger.warning(
+                                    "Validación de argumentos fallida",
+                                    extra={"tool_name": fn_name, "error_details": result["error"]}
+                                )
+                            else:
+                                print_tool_call(fn_name, fn_args)
+                                result = self._invoke_tool(fn_name, fn_args)
+                                print_tool_result(result)
 
-                            # Registrar archivos modificados para crítico
-                            if fn_name in ("edit_file", "write_file") and "error" not in result:
-                                if p := result.get("path"): changed_files.append(p)
+                                # Registrar archivos modificados para crítico
+                                if fn_name in ("edit_file", "write_file") and "error" not in result:
+                                    if p := result.get("path"): changed_files.append(p)
 
-                            # Self-healing: si run_command falla, inyectar contexto de error
-                            if fn_name == "run_command" and result.get("returncode", 0) != 0 and "error" not in result:
-                                heal_count += 1
-                                if heal_count <= 3:
-                                    stderr = result.get("stderr", ""); stdout = result.get("stdout", "")
-                                    heal_msg = (f"[AUTO-HEAL #{heal_count}] El comando falló (rc={result['returncode']}).\n"
-                                                f"stdout: {stdout[:500]}\nstderr: {stderr[:500]}\n"
-                                                f"Analiza el error y corrígelo con un enfoque diferente.")
-                                    console.print(f"[{C_ERR}]  ↺ Auto-heal #{heal_count}/3[/]")
-                                    self.logger.warning("Self-healing activado", extra={"error_details": stderr[:200]})
-                                    result["_heal_hint"] = heal_msg
+                                # Self-healing: si run_command falla, inyectar contexto de error
+                                if fn_name == "run_command" and result.get("returncode", 0) != 0 and "error" not in result:
+                                    heal_count += 1
+                                    if heal_count <= 3:
+                                        stderr = result.get("stderr", ""); stdout = result.get("stdout", "")
+                                        heal_msg = (f"[AUTO-HEAL #{heal_count}] El comando falló (rc={result['returncode']}).\n"
+                                                    f"stdout: {stdout[:500]}\nstderr: {stderr[:500]}\n"
+                                                    f"Analiza el error y corrígelo con un enfoque diferente.")
+                                        console.print(f"[{C_ERR}]  ↺ Auto-heal #{heal_count}/3[/]")
+                                        self.logger.warning("Self-healing activado", extra={"error_details": stderr[:200]})
+                                        result["_heal_hint"] = heal_msg
                         else:
                             result = {"error": f"Tool desconocida: {fn_name}"}
                             print_tool_result(result)
@@ -1413,6 +1355,8 @@ if __name__ == "__main__":
     parser.add_argument("--local-url",  default="http://localhost:11434/v1", help="URL del servidor local (SGLang/vLLM/Ollama)")
     parser.add_argument("--groq-model", default="llama-3.3-70b-versatile",  help="Modelo de Groq")
     parser.add_argument("--critic",       action="store_true",             help="Activar modo Actor-Crítico")
+    parser.add_argument("--system-prompt", default=None,
+                        help="Ruta de archivo para usar como prompt de sistema")
     args = parser.parse_args()
 
     model = args.model if args.model else select_model_menu(args.local_url)
@@ -1429,4 +1373,6 @@ if __name__ == "__main__":
         model=selected_local_model, work_dir=args.dir, tag=args.tag, ctx=args.ctx, temp=args.temp,
         local_url=args.local_url, groq_model=selected_groq_model,
         backend=selected_backend, critic=args.critic,
+        system_prompt_path=args.system_prompt,
     ).run()
+

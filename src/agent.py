@@ -1,35 +1,30 @@
-"""
+﻿"""
 Agente de programacion local con Ollama - UI estilo Claude Code
 Uso: python src/agent.py [--model qwen3:14b] [--dir C:\\mi\\proyecto] [--ctx 16384] [--temp 0.15]
 """
 import json
 import logging
-import subprocess
-import platform
 import os
 import sys
 import re
-import shutil
 import argparse
 import time
 import threading
-import difflib
+import inspect
+from functools import wraps
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from common_tool_schemas import PYDANTIC_AVAILABLE, TOOL_SCHEMA_MAP, ValidationError
+from common_tools import WEB_AVAILABLE, ToolRuntime, build_tool_definitions
 
 try:
     from openai import OpenAI
 except ImportError:
     print("Instala openai: pip install openai")
     sys.exit(1)
-
-try:
-    import requests
-    from bs4 import BeautifulSoup
-    from duckduckgo_search import DDGS
-    WEB_AVAILABLE = True
-except ImportError:
-    WEB_AVAILABLE = False
 
 try:
     from rich.console import Console
@@ -44,52 +39,10 @@ except ImportError:
     print("Instala rich: pip install rich")
     sys.exit(1)
 
-try:
-    from pydantic import BaseModel, Field, ValidationError
-    PYDANTIC_AVAILABLE = True
-except ImportError:
-    PYDANTIC_AVAILABLE = False
-
 console = Console()
 
 
-# ── Logging estructurado JSON ─────────────────────────────────────────────────
-
-class _JsonFormatter(logging.Formatter):
-    """Formatea cada registro como una línea JSON (JSONL)."""
-
-    def format(self, record: logging.LogRecord) -> str:
-        payload: dict = {
-            "timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
-            "level":     record.levelname,
-            "message":   record.getMessage(),
-        }
-        # Campos extra opcionales pasados como kwargs al llamar al logger
-        for key in ("user_input", "assistant_response", "tool_name",
-                    "tool_args", "tool_result", "error_details"):
-            if hasattr(record, key):
-                payload[key] = getattr(record, key)
-        if record.exc_info:
-            payload["exception"] = self.formatException(record.exc_info)
-        return json.dumps(payload, ensure_ascii=False)
-
-
-def _make_logger(name: str, log_path: Path) -> logging.Logger:
-    """Crea un logger que escribe en *log_path* sin tocar la consola."""
-    logger = logging.getLogger(name)
-    logger.setLevel(logging.DEBUG)
-    logger.propagate = False          # nunca llega a root → no aparece en consola
-
-    if not logger.handlers:           # evita duplicar handlers al reiniciar sesión
-        fh = logging.FileHandler(log_path, encoding="utf-8")
-        fh.setLevel(logging.DEBUG)
-        fh.setFormatter(_JsonFormatter())
-        logger.addHandler(fh)
-
-    return logger
-
-
-# ── Colores del tema ──────────────────────────────────────────────────────────
+# Colores del tema
 C_PROMPT   = "#5B9BD5"
 C_BULLET   = "#4EC9B0"
 C_TOOL     = "#C586C0"
@@ -102,438 +55,74 @@ C_LOGO2    = "#C0391B"
 C_BORDER   = "#30363D"
 C_TEXT     = "#D4D4D4"
 
-# ── Modelos Pydantic para validación de argumentos de herramientas ────────────
 
-if PYDANTIC_AVAILABLE:
-    class RunCommandArgs(BaseModel):
-        command: str = Field(..., description="Comando a ejecutar.")
-        shell: str = Field("auto", description="Shell: 'auto', 'powershell', 'bash', 'sh', 'cmd'.")
-        timeout: int = Field(60, description="Tiempo máximo de ejecución en segundos.")
-
-    class ReadFileArgs(BaseModel):
-        path: str = Field(..., description="Ruta del archivo.")
-
-    class WriteFileArgs(BaseModel):
-        path: str = Field(..., description="Ruta del archivo.")
-        content: str = Field(..., description="Contenido a escribir.")
-
-    class EditFileArgs(BaseModel):
-        path: str = Field(..., description="Ruta del archivo.")
-        old_text: str = Field(..., description="Texto a buscar.")
-        new_text: str = Field(..., description="Texto de reemplazo.")
-        replace_all: bool = Field(False, description="Reemplazar todas las ocurrencias.")
-        use_regex: bool = Field(False, description="Interpretar old_text como regex.")
-
-    class FindFilesArgs(BaseModel):
-        pattern: str = Field(..., description="Patrón glob.")
-        path: str = Field(".", description="Directorio de búsqueda.")
-
-    class GrepArgs(BaseModel):
-        pattern: str = Field(..., description="Patrón regex a buscar.")
-        path: str = Field(".", description="Directorio de búsqueda.")
-        extension: str = Field("", description="Filtrar por extensión (ej. '.py').")
-
-    class ListDirectoryArgs(BaseModel):
-        path: str = Field(".", description="Ruta del directorio.")
-
-    class DeleteFileArgs(BaseModel):
-        path: str = Field(..., description="Ruta del archivo o carpeta.")
-
-    class CreateDirectoryArgs(BaseModel):
-        path: str = Field(..., description="Ruta de la carpeta a crear.")
-
-    class MoveFileArgs(BaseModel):
-        src: str = Field(..., description="Ruta origen.")
-        dst: str = Field(..., description="Ruta destino.")
-
-    class SearchWebArgs(BaseModel):
-        query: str = Field(..., description="Consulta de búsqueda.")
-        max_results: int = Field(5, description="Número máximo de resultados.")
-
-    class FetchUrlArgs(BaseModel):
-        url: str = Field(..., description="URL a descargar.")
-        max_chars: int = Field(4000, description="Máximo de caracteres a retornar.")
-
-    class ChangeDirectoryArgs(BaseModel):
-        path: str = Field(..., description="Ruta del nuevo directorio de trabajo.")
-
-    TOOL_SCHEMA_MAP: dict = {
-        "run_command":      RunCommandArgs,
-        "read_file":        ReadFileArgs,
-        "write_file":       WriteFileArgs,
-        "edit_file":        EditFileArgs,
-        "find_files":       FindFilesArgs,
-        "grep":             GrepArgs,
-        "list_directory":   ListDirectoryArgs,
-        "delete_file":      DeleteFileArgs,
-        "create_directory": CreateDirectoryArgs,
-        "move_file":        MoveFileArgs,
-        "search_web":       SearchWebArgs,
-        "fetch_url":        FetchUrlArgs,
-        "change_directory": ChangeDirectoryArgs,
-    }
-else:
-    TOOL_SCHEMA_MAP = {}
-
-# Actualizado por Agent.__init__ — las funciones de herramientas lo leen vía _resolve()
+# Runtime y definiciones de herramientas compartidas
 WORK_DIR = "."
-
-_OS = platform.system()  # "Windows", "Linux", "Darwin"
-
-# ─── Herramientas ─────────────────────────────────────────────────────────────
-
-def run_command(command: str, shell: str = "auto", timeout: int = 60) -> dict:
-    """
-    Ejecuta un comando en el shell apropiado para el SO actual.
-    shell="auto" usa powershell en Windows y bash en Linux/macOS.
-    Evita shell=True pasando el comando como lista de argumentos.
-    """
-    try:
-        effective_shell = shell
-        if shell == "auto":
-            effective_shell = "powershell" if _OS == "Windows" else "bash"
-
-        if effective_shell == "powershell":
-            cmd = ["powershell", "-NoProfile", "-Command", command]
-        elif effective_shell == "bash":
-            cmd = ["bash", "-c", command]
-        elif effective_shell == "sh":
-            cmd = ["sh", "-c", command]
-        else:  # cmd — fallback con shell=True solo para este caso
-            result = subprocess.run(
-                command, shell=True, capture_output=True, text=True,
-                timeout=timeout, cwd=WORK_DIR
-            )
-            return {"stdout": result.stdout.strip(), "stderr": result.stderr.strip(), "returncode": result.returncode}
-
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=WORK_DIR)
-        return {"stdout": result.stdout.strip(), "stderr": result.stderr.strip(), "returncode": result.returncode}
-    except subprocess.TimeoutExpired:
-        return {"error": f"Timeout: el comando tardó más de {timeout}s"}
-    except FileNotFoundError as e:
-        return {"error": f"Shell no encontrado ({effective_shell}): {e}"}
-    except Exception as e:
-        return {"error": str(e)}
+ROOT_DIR = str(Path(".").resolve())
+_TOOL_RUNTIME = ToolRuntime(WORK_DIR, ROOT_DIR)
 
 
-def read_file(path: str) -> dict:
-    try:
-        p = _resolve(path)
-        if not p.exists():
-            return {"error": f"Archivo no encontrado: {path}"}
-        if p.stat().st_size > 2_000_000:
-            return {"error": "Archivo demasiado grande (>2MB)"}
-        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
-        numbered = "\n".join(f"{i+1:4}: {l}" for i, l in enumerate(lines))
-        return {"content": numbered, "path": str(p), "lines": len(lines)}
-    except Exception as e:
-        return {"error": str(e)}
+def _sync_tool_runtime() -> None:
+    _TOOL_RUNTIME.set_workspace(WORK_DIR, ROOT_DIR)
 
 
-def write_file(path: str, content: str) -> dict:
-    try:
-        p = _resolve(path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content, encoding="utf-8")
-        return {"success": True, "path": str(p), "lines": len(content.splitlines())}
-    except Exception as e:
-        return {"error": str(e)}
+def _sync_tool_globals() -> None:
+    global WORK_DIR, ROOT_DIR
+    WORK_DIR = _TOOL_RUNTIME.work_dir
+    ROOT_DIR = _TOOL_RUNTIME.root_dir
 
 
-def edit_file(path: str, old_text: str, new_text: str,
-              replace_all: bool = False, use_regex: bool = False) -> dict:
-    """
-    Edita un archivo.
-    - replace_all=True  → reemplaza todas las ocurrencias (no solo la primera)
-    - use_regex=True    → old_text se interpreta como expresión regular
-    """
-    try:
-        p = _resolve(path)
-        if not p.exists():
-            return {"error": f"Archivo no encontrado: {path}"}
-        content = p.read_text(encoding="utf-8", errors="replace")
+def _wrap_tool(method_name: str):
+    method = getattr(_TOOL_RUNTIME, method_name)
 
-        if use_regex:
-            try:
-                pattern = re.compile(old_text, re.MULTILINE)
-            except re.error as e:
-                return {"error": f"Regex inválida: {e}"}
-            if not pattern.search(content):
-                return {"error": "Patrón regex no encontrado en el archivo."}
-            count = len(pattern.findall(content))
-            new_content = pattern.sub(new_text, content) if replace_all \
-                          else pattern.sub(new_text, content, count=1)
-        else:
-            if old_text not in content:
-                return {"error": "Texto no encontrado. Debe ser exacto (incluyendo espacios e indentación)."}
-            count = content.count(old_text)
-            new_content = content.replace(old_text, new_text) if replace_all \
-                          else content.replace(old_text, new_text, 1)
+    @wraps(method)
+    def _wrapped(*args, **kwargs):
+        _sync_tool_runtime()
+        result = getattr(_TOOL_RUNTIME, method_name)(*args, **kwargs)
+        _sync_tool_globals()
+        return result
 
-        old_lines = content.splitlines(keepends=True)
-        new_lines = new_content.splitlines(keepends=True)
-        raw_diff  = list(difflib.unified_diff(old_lines, new_lines, n=2))
-
-        diff_entries: list = []
-        lines_added = lines_removed = 0
-        old_ln = new_ln = 0
-        for dl in raw_diff:
-            if dl.startswith("@@"):
-                m = re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", dl)
-                if m:
-                    old_ln, new_ln = int(m.group(1)), int(m.group(2))
-            elif dl.startswith("---") or dl.startswith("+++"):
-                continue
-            elif dl.startswith("-"):
-                diff_entries.append((old_ln, "removed", dl[1:].rstrip("\n")))
-                old_ln += 1; lines_removed += 1
-            elif dl.startswith("+"):
-                diff_entries.append((new_ln, "added", dl[1:].rstrip("\n")))
-                new_ln += 1; lines_added += 1
-            elif dl.startswith(" "):
-                diff_entries.append((old_ln, "context", dl[1:].rstrip("\n")))
-                old_ln += 1; new_ln += 1
-
-        p.write_text(new_content, encoding="utf-8")
-        replaced = count if replace_all else 1
-        return {
-            "success": True, "path": str(p), "replaced": replaced,
-            "added": lines_added, "removed": lines_removed,
-            "diff": diff_entries[:30],
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-
-def find_files(pattern: str, path: str = ".") -> dict:
-    try:
-        p = _resolve(path)
-        matches = sorted(p.glob(pattern))
-        return {"pattern": pattern, "path": str(p),
-                "files": [str(f.relative_to(p)) for f in matches if f.is_file()][:50]}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-def grep(pattern: str, path: str = ".", extension: str = "") -> dict:
-    try:
-        p = _resolve(path)
-        results = []
-        glob_pat = f"**/*{extension}" if extension else "**/*"
-        try:
-            regex = re.compile(pattern, re.IGNORECASE)
-        except re.error as e:
-            return {"error": f"Regex inválida: {e}"}
-        for file in sorted(p.glob(glob_pat)):
-            if not file.is_file() or file.stat().st_size > 1_000_000:
-                continue
-            try:
-                for i, line in enumerate(file.read_text(encoding="utf-8", errors="replace").splitlines()):
-                    if regex.search(line):
-                        results.append({"file": str(file.relative_to(p)), "line": i + 1, "content": line.strip()})
-                        if len(results) >= 50:
-                            break
-            except Exception:
-                pass
-            if len(results) >= 50:
-                break
-        return {"pattern": pattern, "results": results}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-def list_directory(path: str = ".") -> dict:
-    try:
-        p = _resolve(path)
-        if not p.exists():
-            return {"error": f"No encontrado: {path}"}
-        entries = []
-        for item in sorted(p.iterdir()):
-            entries.append({"name": item.name, "type": "dir" if item.is_dir() else "file",
-                             "size": item.stat().st_size if item.is_file() else None})
-        return {"path": str(p), "entries": entries}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-def delete_file(path: str) -> dict:
-    try:
-        p = _resolve(path)
-        if not p.exists():
-            return {"error": f"No existe: {path}"}
-        if p.is_dir():
-            shutil.rmtree(p)
-        else:
-            p.unlink()
-        return {"success": True, "deleted": str(p)}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-def create_directory(path: str) -> dict:
-    try:
-        p = _resolve(path)
-        p.mkdir(parents=True, exist_ok=True)
-        return {"success": True, "path": str(p)}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-def move_file(src: str, dst: str) -> dict:
-    try:
-        s = _resolve(src)
-        d = _resolve(dst)
-        if not s.exists():
-            return {"error": f"No existe: {src}"}
-        d.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(s), str(d))
-        return {"success": True, "from": str(s), "to": str(d)}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-def search_web(query: str, max_results: int = 5) -> dict:
-    if not WEB_AVAILABLE:
-        return {"error": "Instala: pip install duckduckgo-search requests beautifulsoup4"}
-    try:
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=max_results))
-        if not results:
-            return {"results": [], "message": "Sin resultados"}
-        return {"query": query, "results": [
-            {"title": r.get("title", ""), "url": r.get("href", ""), "snippet": r.get("body", "")}
-            for r in results
-        ]}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-def fetch_url(url: str, max_chars: int = 4000) -> dict:
-    if not WEB_AVAILABLE:
-        return {"error": "Instala: pip install requests beautifulsoup4"}
-    try:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        resp = requests.get(url, headers=headers, timeout=15)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-        for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
-            tag.decompose()
-        text = " ".join(soup.get_text(separator=" ").split())
-        return {"url": url, "content": text[:max_chars] + ("…" if len(text) > max_chars else ""), "chars": len(text)}
-    except Exception as e:
-        return {"error": str(e)}
+    return _wrapped
 
 
 def _resolve(path: str) -> Path:
-    p = Path(path)
-    if not p.is_absolute():
-        p = Path(WORK_DIR) / p
-    return p.resolve()
+    _sync_tool_runtime()
+    resolved = _TOOL_RUNTIME.resolve(path)
+    _sync_tool_globals()
+    return resolved
 
 
-def change_directory(path: str) -> dict:
-    """Cambia el directorio de trabajo activo del agente."""
-    global WORK_DIR
-    try:
-        p = Path(path)
-        if not p.is_absolute():
-            p = Path(WORK_DIR) / p
-        p = p.resolve()
-        if not p.exists():
-            return {"error": f"Directorio no encontrado: {path}"}
-        if not p.is_dir():
-            return {"error": f"No es un directorio: {path}"}
-        WORK_DIR = str(p)
-        return {"success": True, "cwd": str(p)}
-    except Exception as e:
-        return {"error": str(e)}
-
+run_command = _wrap_tool("run_command")
+read_file = _wrap_tool("read_file")
+write_file = _wrap_tool("write_file")
+edit_file = _wrap_tool("edit_file")
+find_files = _wrap_tool("find_files")
+grep = _wrap_tool("grep")
+list_directory = _wrap_tool("list_directory")
+delete_file = _wrap_tool("delete_file")
+create_directory = _wrap_tool("create_directory")
+move_file = _wrap_tool("move_file")
+search_web = _wrap_tool("search_web")
+fetch_url = _wrap_tool("fetch_url")
+change_directory = _wrap_tool("change_directory")
 
 TOOL_MAP = {
-    "run_command":      run_command,
-    "read_file":        read_file,
-    "write_file":       write_file,
-    "edit_file":        edit_file,
-    "find_files":       find_files,
-    "grep":             grep,
-    "list_directory":   list_directory,
-    "delete_file":      delete_file,
+    "run_command": run_command,
+    "read_file": read_file,
+    "write_file": write_file,
+    "edit_file": edit_file,
+    "find_files": find_files,
+    "grep": grep,
+    "list_directory": list_directory,
+    "delete_file": delete_file,
     "create_directory": create_directory,
-    "move_file":        move_file,
-    "search_web":       search_web,
-    "fetch_url":        fetch_url,
+    "move_file": move_file,
+    "search_web": search_web,
+    "fetch_url": fetch_url,
     "change_directory": change_directory,
 }
 
-_BASE_TOOLS = [
-    {"type": "function", "function": {"name": "run_command",
-      "description": "Ejecuta comandos en el shell del SO (auto-detecta powershell/bash).",
-      "parameters": {"type": "object", "properties": {
-          "command": {"type": "string"},
-          "shell":   {"type": "string", "enum": ["auto", "powershell", "bash", "sh", "cmd"],
-                      "description": "Shell a usar. 'auto' selecciona el correcto para el SO."},
-          "timeout": {"type": "integer"}}, "required": ["command"]}}},
-    {"type": "function", "function": {"name": "read_file",
-      "description": "Lee un archivo con números de línea.",
-      "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}},
-    {"type": "function", "function": {"name": "write_file",
-      "description": "Crea un archivo nuevo.",
-      "parameters": {"type": "object", "properties": {
-          "path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}},
-    {"type": "function", "function": {"name": "edit_file",
-      "description": "Edita texto en un archivo existente. Soporta reemplazo múltiple y regex.",
-      "parameters": {"type": "object", "properties": {
-          "path":        {"type": "string"},
-          "old_text":    {"type": "string"},
-          "new_text":    {"type": "string"},
-          "replace_all": {"type": "boolean", "description": "Si true, reemplaza todas las ocurrencias"},
-          "use_regex":   {"type": "boolean", "description": "Si true, old_text es una expresión regular"}},
-          "required": ["path", "old_text", "new_text"]}}},
-    {"type": "function", "function": {"name": "find_files",
-      "description": "Busca archivos por patrón glob.",
-      "parameters": {"type": "object", "properties": {
-          "pattern": {"type": "string"}, "path": {"type": "string"}}, "required": ["pattern"]}}},
-    {"type": "function", "function": {"name": "grep",
-      "description": "Busca texto/regex en el proyecto.",
-      "parameters": {"type": "object", "properties": {
-          "pattern": {"type": "string"}, "path": {"type": "string"}, "extension": {"type": "string"}},
-          "required": ["pattern"]}}},
-    {"type": "function", "function": {"name": "list_directory",
-      "description": "Lista carpetas.",
-      "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": []}}},
-    {"type": "function", "function": {"name": "delete_file",
-      "description": "Elimina un archivo o carpeta (recursivo para carpetas no vacías).",
-      "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}},
-    {"type": "function", "function": {"name": "create_directory",
-      "description": "Crea una carpeta y subcarpetas si es necesario.",
-      "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}},
-    {"type": "function", "function": {"name": "move_file",
-      "description": "Mueve o renombra un archivo o carpeta.",
-      "parameters": {"type": "object", "properties": {
-          "src": {"type": "string", "description": "Ruta origen"},
-          "dst": {"type": "string", "description": "Ruta destino"}},
-          "required": ["src", "dst"]}}},
-    {"type": "function", "function": {"name": "change_directory",
-      "description": "Cambia el directorio de trabajo activo. Úsalo cuando el usuario mencione un directorio específico distinto al actual.",
-      "parameters": {"type": "object", "properties": {
-          "path": {"type": "string", "description": "Ruta absoluta o relativa del nuevo directorio de trabajo"}},
-          "required": ["path"]}}},
-]
-
-_WEB_TOOLS = [
-    {"type": "function", "function": {"name": "search_web",
-      "description": "Busca en internet con DuckDuckGo para info actual, documentación, noticias.",
-      "parameters": {"type": "object", "properties": {
-          "query":       {"type": "string"},
-          "max_results": {"type": "integer"}}, "required": ["query"]}}},
-    {"type": "function", "function": {"name": "fetch_url",
-      "description": "Descarga y lee el contenido de una URL.",
-      "parameters": {"type": "object", "properties": {
-          "url":       {"type": "string"},
-          "max_chars": {"type": "integer"}}, "required": ["url"]}}},
-] if WEB_AVAILABLE else []
-
-TOOLS = _BASE_TOOLS + _WEB_TOOLS
+TOOLS = build_tool_definitions(include_web=True)
 
 
 # ─── UI ───────────────────────────────────────────────────────────────────────
@@ -998,8 +587,9 @@ class Agent:
 
     def __init__(self, model: str, work_dir: str, tag: str,
                  num_ctx: int, temperature: float,
-                 api_base: str = "http://localhost:11434/v1"):
-        global WORK_DIR
+                 api_base: str = "http://localhost:11434/v1",
+                 system_prompt_path: Optional[str] = None):
+        global WORK_DIR, ROOT_DIR
         self.model        = model
         self.work_dir     = str(Path(work_dir).resolve())
         self.tag          = tag
@@ -1009,13 +599,28 @@ class Agent:
         self.current_mode = "code"
         self.client       = OpenAI(base_url=api_base, api_key="sk-no-key-required")
         self.messages: list = []
+        self.system_prompt_path = Path(system_prompt_path).resolve() if system_prompt_path else None
         # Actualiza la variable global para que las funciones de herramientas
         # (module-level) resuelvan rutas relativas al directorio correcto.
         WORK_DIR = self.work_dir
+        ROOT_DIR = self.work_dir
 
         # Logger de auditoría — escribe en work_dir/agent_session.jsonl
         log_path = Path(self.work_dir) / "agent_session.jsonl"
         self.logger = _make_logger(f"agent.{id(self)}", log_path)
+
+    def _read_system_prompt_override(self) -> Optional[str]:
+        """Lee un prompt de sistema externo si se proporcionó la ruta."""
+        if not self.system_prompt_path:
+            return None
+        try:
+            return self.system_prompt_path.read_text(encoding="utf-8")
+        except Exception as e:
+            self.logger.error(
+                "No se pudo leer el prompt externo",
+                extra={"error_details": str(e)}
+            )
+            return None
 
     def _build_options(self) -> dict:
         return {
@@ -1219,6 +824,22 @@ class Agent:
             msgs = "; ".join(f"{err['loc'][0]}: {err['msg']}" for err in e.errors())
             return {"error": f"ValidationError en '{fn_name}': {msgs}"}
 
+    def _invoke_tool(self, fn_name: str, fn_args: dict) -> dict:
+        fn = TOOL_MAP[fn_name]
+        try:
+            inspect.signature(fn).bind(**fn_args)
+        except TypeError as e:
+            return {"error": f"Argumentos inválidos para '{fn_name}': {e}"}
+        try:
+            return fn(**fn_args)
+        except Exception as e:
+            self.logger.error(
+                "Excepción en herramienta",
+                extra={"tool_name": fn_name, "error_details": str(e)},
+                exc_info=True
+            )
+            return {"error": f"Excepción ejecutando '{fn_name}': {e}"}
+
     def _validate_model(self) -> bool:
         try:
             available = [m.id for m in self.client.models.list().data]
@@ -1243,6 +864,21 @@ class Agent:
 
         def _make_system_prompt() -> str:
             cfg = self.MODE_CONFIGS[self.current_mode]
+            override = self._read_system_prompt_override()
+            if override:
+                try:
+                    return override.format(
+                        work_dir=self.work_dir,
+                        project_context=project_context,
+                        mode=self.current_mode,
+                        mode_snippet=cfg["system_prompt_snippet"],
+                    )
+                except Exception as e:
+                    self.logger.error(
+                        "Falló el formateo del prompt externo",
+                        extra={"error_details": str(e)}
+                    )
+                    return override
             return build_system_prompt(
                 self.work_dir, project_context,
                 self.current_mode, cfg["system_prompt_snippet"]
@@ -1333,7 +969,7 @@ class Agent:
                                     extra={"tool_name": fn_name, "tool_args": fn_args}
                                 )
                                 print_tool_call(fn_name, fn_args)
-                                result = TOOL_MAP[fn_name](**fn_args)
+                                result = self._invoke_tool(fn_name, fn_args)
                                 self.logger.debug(
                                     "Resultado de herramienta",
                                     extra={
@@ -1426,8 +1062,9 @@ def select_model_menu(api_base: str = "http://localhost:11434/v1") -> str:
 
 
 def run_agent(model: str, work_dir: str, tag: str, num_ctx: int, temperature: float,
-              api_base: str = "http://localhost:11434/v1"):
-    Agent(model, work_dir, tag, num_ctx, temperature, api_base).run()
+              api_base: str = "http://localhost:11434/v1",
+              system_prompt_path: Optional[str] = None):
+    Agent(model, work_dir, tag, num_ctx, temperature, api_base, system_prompt_path).run()
 
 
 if __name__ == "__main__":
@@ -1439,6 +1076,9 @@ if __name__ == "__main__":
     parser.add_argument("--temp",     type=float, default=0.15,  help="Temperatura 0.0-1.0")
     parser.add_argument("--api-base", default="http://localhost:11434/v1",
                         help="URL base API compatible OpenAI (Ollama, vLLM, LMDeploy, LM Studio)")
+    parser.add_argument("--system-prompt", default=None,
+                        help="Ruta de archivo para usar como prompt de sistema")
     args = parser.parse_args()
     model = args.model if args.model else select_model_menu(args.api_base)
-    run_agent(model, args.dir, args.tag, args.ctx, args.temp, args.api_base)
+    run_agent(model, args.dir, args.tag, args.ctx, args.temp, args.api_base, args.system_prompt)
+

@@ -1,0 +1,5 @@
+-r requirements.txt
+
+# Extras específicos de MEGA
+sglang
+vllm

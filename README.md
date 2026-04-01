@@ -18,6 +18,7 @@ Agente estándar que corre contra Ollama (o cualquier backend OpenAI-compatible)
 - Streaming con detección de bloques `<think>` y `<thought>`
 - Autocorrección — reintenta hasta 3 veces con enfoque diferente ante errores
 - Menú interactivo de selección de modelo al arrancar
+- Seguridad básica — bloquea comandos destructivos comunes y restringe operaciones al `work_dir`
 - Compatible con Ollama, vLLM, LMDeploy y LM Studio vía `--api-base`
 
 ### `IA/MEGA/agent.py` — Agente híbrido dual-brain
@@ -70,13 +71,17 @@ Agente avanzado con GPU local + Groq cloud. Router inteligente que decide el bac
 ```bash
 git clone https://github.com/DariodelBarrio/ollama-agent.git
 cd ollama-agent
-pip install -r requirements.txt
+python scripts/install.py
+
+# Para MEGA (añade sglang/vllm y extras)
+python scripts/install.py --mega
 ```
 
-Para MEGA (dependencias adicionales):
+Instalación manual:
 
-```
-IA/MEGA/INSTALAR DEPENDENCIAS.bat
+```bash
+pip install -r requirements.txt               # agente estándar
+pip install -r requirements-mega.txt         # MEGA
 ```
 
 ---
@@ -106,6 +111,7 @@ python src/agent.py --model mistral --api-base http://localhost:8000/v1
 | `--ctx` | `16384` | Ventana de contexto en tokens |
 | `--temp` | `0.15` | Temperatura |
 | `--api-base` | `http://localhost:11434/v1` | URL base API (Ollama/vLLM/LMDeploy/LM Studio) |
+| `--system-prompt` | `None` | Archivo opcional con prompt de sistema (acepta {work_dir}, {project_context}, {mode}, {mode_snippet}) |
 
 **Comandos de sesión:**
 
@@ -114,6 +120,8 @@ python src/agent.py --model mistral --api-base http://localhost:8000/v1
 | `salir` / `exit` / `quit` | Termina el agente |
 | `limpiar` / `clear` / `reset` | Reinicia el historial |
 | `/mode [code\|architect\|research]` | Cambia el modo de trabajo |
+
+Prompt externo: pasa `--system-prompt ruta/al/archivo.md` para cargar tus propias reglas. Ejemplo en `prompts/system_prompt.example.md`.
 
 ### `IA/MEGA/agent.py`
 
@@ -140,6 +148,7 @@ python agent.py --model qwen2.5-coder:14b --backend auto --critic
 | `--ctx` | `32768` | Ventana de contexto |
 | `--temp` | `0.15` | Temperatura |
 | `--critic` | off | Activa modo Actor-Crítico |
+| `--system-prompt` | `None` | Archivo opcional con prompt de sistema (acepta {work_dir}, {project_context}, {memories}) |
 
 **Comandos /slash de MEGA:**
 
@@ -152,6 +161,8 @@ python agent.py --model qwen2.5-coder:14b --backend auto --critic
 | `/ctx` | Muestra tokens de contexto usados |
 | `/scan` | Escanea la estructura AST del proyecto |
 | `/stats` | Estadísticas de llamadas al router |
+
+Prompt externo: `--system-prompt ruta/al/archivo.md` (usa {work_dir}, {project_context}, {memories}).
 
 **Launchers .bat incluidos:**
 
@@ -266,6 +277,14 @@ duckduckgo-search
 requests
 beautifulsoup4
 pydantic
+```
+
+---
+
+## Tests
+
+```bash
+py -3 -m unittest discover -s tests -p "test_*.py"
 ```
 
 ---

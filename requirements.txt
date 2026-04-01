@@ -1,6 +1,9 @@
 ollama
+openai
 rich
+pydantic
 duckduckgo-search
 requests
 beautifulsoup4
+prompt_toolkit
 fpdf2
