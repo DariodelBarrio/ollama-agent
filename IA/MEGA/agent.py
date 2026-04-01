@@ -332,8 +332,8 @@ class MemoryDB:
                     tags         TEXT    NOT NULL DEFAULT '',
                     importance   INTEGER NOT NULL DEFAULT 5,
                     access_count INTEGER NOT NULL DEFAULT 0,
-                    created_at   REAL    NOT NULL DEFAULT (unixepoch('now')),
-                    updated_at   REAL    NOT NULL DEFAULT (unixepoch('now')),
+                    created_at   REAL    NOT NULL DEFAULT 0,
+                    updated_at   REAL    NOT NULL DEFAULT 0,
                     UNIQUE(key, category)
                 );
                 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts
