@@ -6,7 +6,7 @@ Router inteligente · Self-healing · Actor-Crítico · TUI profesional · Coman
 Uso: python agent.py [--model MODEL] [--dir DIR] [--backend local|groq|auto]
      [--local-url URL] [--groq-model MODEL] [--ctx N] [--temp F] [--critic] [--tag TAG]
 """
-import json, os, re, sys, time, shutil, platform, argparse, threading, difflib, subprocess, logging
+import json, os, re, sys, time, shutil, platform, argparse, threading, difflib, subprocess, logging, sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -308,50 +308,168 @@ def change_directory(path: str) -> dict:
     except Exception as e: return {"error": str(e)}
 
 
-# ── Memoria Persistente + Compactación + Keyword Triggers ────────────────────
-MEMORY_FILE = _SCRIPT_DIR / "agent_memory.json"
-COMPACT_THRESHOLD = 50  # mensajes antes de auto-compactar
+# ── Memoria Persistente SQLite + FTS5 ────────────────────────────────────────
+COMPACT_THRESHOLD = 50
 
-def load_memories() -> dict:
-    try:
-        if MEMORY_FILE.exists():
-            return json.loads(MEMORY_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        pass
-    return {"facts": {}, "patterns": {}, "preferences": {}}
+class MemoryDB:
+    """
+    Memoria persistente entre sesiones usando SQLite + FTS5.
+    Soporta búsqueda full-text, importancia, timestamps y conteo de accesos.
+    """
+    def __init__(self, db_path: Path):
+        self.db_path = db_path
+        self._init()
+        self._migrate_json()
 
-def save_memory(key: str, value: str, category: str = "facts") -> dict:
-    mems = load_memories()
-    if category not in mems:
-        mems[category] = {}
-    mems[category][key] = value
-    try:
-        MEMORY_FILE.write_text(json.dumps(mems, ensure_ascii=False, indent=2), encoding="utf-8")
-        return {"success": True, "key": key, "category": category}
-    except Exception as e:
-        return {"error": str(e)}
+    def _init(self):
+        with sqlite3.connect(self.db_path) as c:
+            c.executescript("""
+                CREATE TABLE IF NOT EXISTS memories (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    key          TEXT    NOT NULL,
+                    value        TEXT    NOT NULL,
+                    category     TEXT    NOT NULL DEFAULT 'fact',
+                    tags         TEXT    NOT NULL DEFAULT '',
+                    importance   INTEGER NOT NULL DEFAULT 5,
+                    access_count INTEGER NOT NULL DEFAULT 0,
+                    created_at   REAL    NOT NULL DEFAULT (unixepoch('now')),
+                    updated_at   REAL    NOT NULL DEFAULT (unixepoch('now')),
+                    UNIQUE(key, category)
+                );
+                CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts
+                    USING fts5(key, value, content=memories, content_rowid=id);
+                CREATE TRIGGER IF NOT EXISTS mem_ai AFTER INSERT ON memories BEGIN
+                    INSERT INTO memories_fts(rowid,key,value) VALUES(new.id,new.key,new.value);
+                END;
+                CREATE TRIGGER IF NOT EXISTS mem_au AFTER UPDATE ON memories BEGIN
+                    UPDATE memories_fts SET key=new.key,value=new.value WHERE rowid=new.id;
+                END;
+                CREATE TRIGGER IF NOT EXISTS mem_ad AFTER DELETE ON memories BEGIN
+                    DELETE FROM memories_fts WHERE rowid=old.id;
+                END;
+            """)
 
-def delete_memory(key: str, category: str = "facts") -> dict:
-    mems = load_memories()
-    if category in mems and key in mems[category]:
-        del mems[category][key]
+    def _migrate_json(self):
+        """Migra memorias del formato JSON anterior si existe."""
+        old = _SCRIPT_DIR / "agent_memory.json"
+        if not old.exists(): return
         try:
-            MEMORY_FILE.write_text(json.dumps(mems, ensure_ascii=False, indent=2), encoding="utf-8")
-            return {"success": True, "deleted": f"{category}/{key}"}
+            data = json.loads(old.read_text(encoding="utf-8"))
+            for cat, items in data.items():
+                if isinstance(items, dict):
+                    for key, value in items.items():
+                        self.save(key, str(value), category=cat)
+            old.rename(old.with_suffix(".json.bak"))
+        except Exception:
+            pass
+
+    def save(self, key: str, value: str, category: str = "fact",
+             importance: int = 5, tags: str = "") -> dict:
+        try:
+            with sqlite3.connect(self.db_path) as c:
+                c.execute("""
+                    INSERT INTO memories(key,value,category,tags,importance,updated_at)
+                    VALUES(?,?,?,?,?,unixepoch('now'))
+                    ON CONFLICT(key,category) DO UPDATE SET
+                        value=excluded.value, tags=excluded.tags,
+                        importance=excluded.importance, updated_at=unixepoch('now')
+                """, (key, value, category, tags, importance))
+            return {"success": True, "key": key, "category": category}
         except Exception as e:
             return {"error": str(e)}
-    return {"error": f"'{key}' no encontrado en '{category}'"}
 
-def format_memories(mems: dict) -> str:
-    items = [(cat, k, v) for cat, d in mems.items() for k, v in (d or {}).items()]
-    if not items:
-        return ""
-    lines = ["═══════════════════════════════════════════════════════",
-             "MEMORIAS DE SESIONES ANTERIORES",
-             "═══════════════════════════════════════════════════════"]
-    for cat, k, v in items:
-        lines.append(f"  [{cat}] {k}: {v}")
-    return "\n".join(lines) + "\n"
+    def search(self, query: str, limit: int = 5) -> list:
+        try:
+            with sqlite3.connect(self.db_path) as c:
+                rows = c.execute("""
+                    SELECT m.key, m.value, m.category, m.importance
+                    FROM memories_fts f
+                    JOIN memories m ON m.id = f.rowid
+                    WHERE memories_fts MATCH ?
+                    ORDER BY rank, m.importance DESC, m.updated_at DESC
+                    LIMIT ?
+                """, (query, limit)).fetchall()
+                if rows:
+                    c.executemany(
+                        "UPDATE memories SET access_count=access_count+1 WHERE key=?",
+                        [(r[0],) for r in rows]
+                    )
+            return [{"key": r[0], "value": r[1], "category": r[2], "importance": r[3]}
+                    for r in rows]
+        except Exception:
+            return []
+
+    def delete(self, key: str, category: str = "fact") -> dict:
+        try:
+            with sqlite3.connect(self.db_path) as c:
+                n = c.execute(
+                    "DELETE FROM memories WHERE key=? AND category=?", (key, category)
+                ).rowcount
+            return {"success": True, "deleted": n} if n else {"error": f"'{key}' no encontrado en '{category}'"}
+        except Exception as e:
+            return {"error": str(e)}
+
+    def top(self, limit: int = 12) -> list:
+        """Memorias más importantes para inyectar en el system prompt."""
+        try:
+            with sqlite3.connect(self.db_path) as c:
+                rows = c.execute("""
+                    SELECT key, value, category, importance
+                    FROM memories
+                    ORDER BY importance DESC, access_count DESC, updated_at DESC
+                    LIMIT ?
+                """, (limit,)).fetchall()
+            return [{"key": r[0], "value": r[1], "category": r[2], "importance": r[3]}
+                    for r in rows]
+        except Exception:
+            return []
+
+    def list_all(self, category: str = "") -> list:
+        try:
+            with sqlite3.connect(self.db_path) as c:
+                if category:
+                    rows = c.execute(
+                        "SELECT key,value,category,importance FROM memories WHERE category=? ORDER BY importance DESC,updated_at DESC",
+                        (category,)
+                    ).fetchall()
+                else:
+                    rows = c.execute(
+                        "SELECT key,value,category,importance FROM memories ORDER BY category,importance DESC"
+                    ).fetchall()
+            return [{"key": r[0], "value": r[1], "category": r[2], "importance": r[3]}
+                    for r in rows]
+        except Exception:
+            return []
+
+    def format_for_prompt(self) -> str:
+        mems = self.top(12)
+        if not mems: return ""
+        by_cat: dict = {}
+        for m in mems:
+            by_cat.setdefault(m["category"], []).append(f"  • {m['key']}: {m['value']}")
+        lines = ["═══════════════════════════════════════════════════════",
+                 "MEMORIAS DE SESIONES ANTERIORES",
+                 "═══════════════════════════════════════════════════════"]
+        for cat, items in by_cat.items():
+            lines.append(f"[{cat.upper()}]"); lines.extend(items)
+        return "\n".join(lines) + "\n"
+
+
+# Global — inicializado en Agent.__init__
+_mem: Optional[MemoryDB] = None
+
+def save_memory(key: str, value: str, category: str = "fact", importance: int = 5) -> dict:
+    if _mem is None: return {"error": "Memoria no inicializada"}
+    return _mem.save(key, value, category, importance)
+
+def memory_search(query: str, limit: int = 5) -> dict:
+    if _mem is None: return {"error": "Memoria no inicializada"}
+    results = _mem.search(query, limit)
+    return {"query": query, "results": results, "count": len(results)}
+
+def delete_memory(key: str, category: str = "fact") -> dict:
+    if _mem is None: return {"error": "Memoria no inicializada"}
+    return _mem.delete(key, category)
 
 _KW_MODES = [
     (r'\b(planifica|plan\s+detallado|plan\s+paso\s+a\s+paso)\b',
@@ -380,7 +498,7 @@ TOOL_MAP = {
     "list_directory": list_directory, "delete_file": delete_file,
     "create_directory": create_directory, "move_file": move_file,
     "search_web": search_web, "fetch_url": fetch_url, "change_directory": change_directory,
-    "save_memory": save_memory, "delete_memory": delete_memory,
+    "save_memory": save_memory, "memory_search": memory_search, "delete_memory": delete_memory,
 }
 
 TOOLS = [
@@ -395,8 +513,9 @@ TOOLS = [
     {"type":"function","function":{"name":"create_directory","description":"Crea carpeta.","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}},
     {"type":"function","function":{"name":"move_file","description":"Mueve o renombra.","parameters":{"type":"object","properties":{"src":{"type":"string"},"dst":{"type":"string"}},"required":["src","dst"]}}},
     {"type":"function","function":{"name":"change_directory","description":"Cambia directorio de trabajo activo.","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}},
-    {"type":"function","function":{"name":"save_memory","description":"Guarda un hecho duradero en memoria persistente entre sesiones.","parameters":{"type":"object","properties":{"key":{"type":"string","description":"Nombre corto en snake_case"},"value":{"type":"string","description":"Descripción concisa"},"category":{"type":"string","enum":["facts","patterns","preferences","bugs"]}},"required":["key","value"]}}},
-    {"type":"function","function":{"name":"delete_memory","description":"Elimina una memoria guardada.","parameters":{"type":"object","properties":{"key":{"type":"string"},"category":{"type":"string","enum":["facts","patterns","preferences","bugs"]}},"required":["key"]}}},
+    {"type":"function","function":{"name":"save_memory","description":"Guarda un hecho duradero en memoria persistente SQLite entre sesiones. Usa para preferencias, patrones de código, decisiones de arquitectura, bugs conocidos.","parameters":{"type":"object","properties":{"key":{"type":"string","description":"Identificador corto en snake_case"},"value":{"type":"string","description":"Descripción concisa del hecho a recordar"},"category":{"type":"string","enum":["fact","pattern","preference","bug","project"],"description":"Categoría de la memoria"},"importance":{"type":"integer","description":"Importancia 1-10 (10=crítico). Default 5."}},"required":["key","value"]}}},
+    {"type":"function","function":{"name":"memory_search","description":"Busca en la memoria persistente por texto. Usa full-text search para encontrar memorias relevantes al contexto actual.","parameters":{"type":"object","properties":{"query":{"type":"string","description":"Términos a buscar"},"limit":{"type":"integer","description":"Máximo de resultados (default 5)"}},"required":["query"]}}},
+    {"type":"function","function":{"name":"delete_memory","description":"Elimina una memoria guardada.","parameters":{"type":"object","properties":{"key":{"type":"string"},"category":{"type":"string","enum":["fact","pattern","preference","bug","project"]}},"required":["key"]}}},
 ] + ([
     {"type":"function","function":{"name":"search_web","description":"Busca en internet con DuckDuckGo.","parameters":{"type":"object","properties":{"query":{"type":"string"},"max_results":{"type":"integer"}},"required":["query"]}}},
     {"type":"function","function":{"name":"fetch_url","description":"Descarga y lee el contenido de una URL.","parameters":{"type":"object","properties":{"url":{"type":"string"},"max_chars":{"type":"integer"}},"required":["url"]}}},
@@ -459,7 +578,8 @@ _TOOL_LABELS = {
     "run_command":("Bash","command"), "find_files":("Glob","pattern"), "grep":("Grep","pattern"),
     "list_directory":("LS","path"), "delete_file":("Delete","path"), "create_directory":("Mkdir","path"),
     "move_file":("Move","src"), "search_web":("Web","query"), "fetch_url":("Fetch","url"),
-    "change_directory":("CD","path"), "save_memory":("Memory+","key"), "delete_memory":("Memory-","key"),
+    "change_directory":("CD","path"), "save_memory":("Memory+","key"),
+    "memory_search":("MemSearch","query"), "delete_memory":("Memory-","key"),
 }
 
 def _rel(s: str) -> str:
@@ -666,7 +786,7 @@ def load_project_context(work_dir: str) -> str:
 class Agent:
     def __init__(self, model: str, work_dir: str, tag: str, ctx: int, temp: float,
                  local_url: str, groq_model: str, backend: str, critic: bool):
-        global WORK_DIR, ROOT_DIR
+        global WORK_DIR, ROOT_DIR, _mem
         self.model      = model
         self.work_dir   = str(Path(work_dir).resolve())
         self.tag        = tag + (" ★" if critic else "")
@@ -693,6 +813,10 @@ class Agent:
 
         self.router = SmartRouter(force=None if backend == "auto" else backend)
         self.logger = _make_logger(f"mega.{id(self)}", Path(self.work_dir) / "agent_session.jsonl")
+
+        # Memoria persistente SQLite + FTS5
+        _mem = MemoryDB(_SCRIPT_DIR / "memory.db")
+        self.memdb = _mem
 
         # prompt_toolkit session con historial en el directorio del script
         history_path = str(_SCRIPT_DIR / ".history")
@@ -795,36 +919,39 @@ class Agent:
         elif c == "/dream":
             self._dream()
         elif c == "/memory":
-            mems = load_memories()
             sub = arg.split(maxsplit=1)
             if sub and sub[0] == "forget":
                 key = sub[1].strip() if len(sub) > 1 else ""
                 if not key:
                     console.print(f"[{C_ERR}]  Uso: /memory forget [clave][/]")
                 else:
-                    deleted = False
-                    for cat in mems:
-                        if key in mems.get(cat, {}):
-                            r = delete_memory(key, cat)
-                            if "success" in r:
-                                console.print(f"[{C_OK}]  ✓ Eliminado: [{cat}] {key}[/]")
-                            else:
-                                console.print(f"[{C_ERR}]  ✗ {r.get('error','')}[/]")
-                            deleted = True; break
-                    if not deleted:
+                    r = self.memdb.delete(key)
+                    if r.get("deleted", 0):
+                        console.print(f"[{C_OK}]  ✓ Eliminado: {key}[/]")
+                    else:
                         console.print(f"[{C_ERR}]  '{key}' no encontrado[/]")
+            elif sub and sub[0] == "search":
+                q = sub[1].strip() if len(sub) > 1 else ""
+                if not q:
+                    console.print(f"[{C_ERR}]  Uso: /memory search [consulta][/]")
+                else:
+                    results = self.memdb.search(q, limit=8)
+                    if results:
+                        for m in results:
+                            console.print(f"  [{C_CRITIC}]{m['category']}[/]  [bold]{m['key']}[/]  [{C_DIM}]★{m['importance']}[/]: {m['value']}")
+                    else:
+                        console.print(f"[{C_DIM}]  Sin resultados para: {q}[/]")
             elif arg == "clear":
-                MEMORY_FILE.unlink(missing_ok=True)
+                with sqlite3.connect(self.memdb.db_path) as c_:
+                    c_.execute("DELETE FROM memories")
                 console.print(f"[{C_OK}]  ✓ Todas las memorias eliminadas[/]")
             else:
-                total = sum(len(v) for v in mems.values() if isinstance(v, dict))
-                if total == 0:
+                all_mems = self.memdb.list_all()
+                if not all_mems:
                     console.print(f"[{C_DIM}]  Sin memorias guardadas. Usa /dream para extraer.[/]")
                 else:
-                    for cat, items in mems.items():
-                        if isinstance(items, dict):
-                            for k, v in items.items():
-                                console.print(f"  [{C_CRITIC}]{cat}[/]  [bold]{k}[/]: {v}")
+                    for m in all_mems:
+                        console.print(f"  [{C_CRITIC}]{m['category']}[/]  [{C_DIM}]★{m['importance']}[/]  [bold]{m['key']}[/]: {m['value']}")
         elif c == "/compact":
             self._compact_if_needed(force=True)
         else:
@@ -1106,7 +1233,7 @@ No repitas lo que se hizo, solo señala problemas si los hay."""
 
     def run(self):
         project_context = load_project_context(self.work_dir)
-        memories_text = format_memories(load_memories())
+        memories_text = self.memdb.format_for_prompt()
         system_prompt = build_system_prompt(self.work_dir, project_context, memories_text)
         self.messages = [{"role": "system", "content": system_prompt}]
 
