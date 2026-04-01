@@ -32,3 +32,10 @@ docs/*.pdf
 # Ollama local
 *.gguf
 *.ggml
+
+# MEGA runtime
+IA/MEGA/.history
+IA/MEGA/agent_session.jsonl
+IA/MEGA/memory.db
+IA/MEGA/test_mem.db
+IA/MEGA/agent_memory.json
