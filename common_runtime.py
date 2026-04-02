@@ -3,6 +3,25 @@ import re
 from pathlib import Path
 
 
+BLOCKED_COMMAND_PATTERNS = [
+    r'(^|\s)(rm|rmdir|del|erase)\s',
+    r'(^|\s)rd\s',
+    r'remove-item\b',
+    r'format\b',
+    r'reg\s+(delete|add)\b',
+    r'shutdown\b',
+    r'reboot\b',
+    r'poweroff\b',
+    r'mkfs\b',
+    r'diskpart\b',
+    r'chmod\s+777\b',
+    r'\bcmd\s*/c\s+.*\b(del|erase|rd|rmdir|format|shutdown)\b',
+    r'\bpowershell(\.exe)?\b.*\b(remove-item|del|rm|rmdir)\b',
+    r'curl\b.*\|',
+    r'invoke-webrequest\b.*\|',
+]
+
+
 def is_within_root(path: Path, root_dir: str) -> bool:
     try:
         path.resolve().relative_to(Path(root_dir).resolve())
@@ -21,24 +40,7 @@ def resolve_in_root(path: str, work_dir: str, root_dir: str) -> Path:
 
 def is_safe_command(command: str) -> tuple[bool, str]:
     lowered = command.lower()
-    blocked_patterns = [
-        r'(^|\s)(rm|rmdir|del|erase)\s',
-        r'(^|\s)rd\s',
-        r'remove-item\b',
-        r'format\b',
-        r'reg\s+(delete|add)\b',
-        r'shutdown\b',
-        r'reboot\b',
-        r'poweroff\b',
-        r'mkfs\b',
-        r'diskpart\b',
-        r'chmod\s+777\b',
-        r'\bcmd\s*/c\s+.*\b(del|erase|rd|rmdir|format|shutdown)\b',
-        r'\bpowershell(\.exe)?\b.*\b(remove-item|del|rm|rmdir)\b',
-        r'curl\b.*\|',
-        r'invoke-webrequest\b.*\|',
-    ]
-    for pattern in blocked_patterns:
+    for pattern in BLOCKED_COMMAND_PATTERNS:
         if re.search(pattern, lowered):
             return False, "Comando bloqueado por seguridad"
     return True, ""

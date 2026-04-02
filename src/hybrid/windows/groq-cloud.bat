@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-title MEGA - GROQ [llama-3.3-70b] Nube gratis
+title Ollama Agent - Hybrid Groq Cloud
 cls
 if "%GROQ_API_KEY%"=="" (
     echo [ERROR] Variable GROQ_API_KEY no definida.
@@ -8,5 +8,5 @@ if "%GROQ_API_KEY%"=="" (
     pause
     exit /b 1
 )
-python "%~dp0agent.py" --model qwen2.5-coder:14b --groq-model llama-3.3-70b-versatile --dir "%CD%" --tag GROQ --ctx 32768 --backend groq
+python "%~dp0..\agent.py" --model qwen2.5-coder:14b --groq-model llama-3.3-70b-versatile --dir "%CD%" --tag GROQ --ctx 32768 --backend groq
 pause

@@ -1,5 +1,3 @@
--r requirements.txt
+-r requirements-hybrid.txt
 
-# Extras específicos de MEGA
-sglang
-vllm
+# Alias legado. Usa requirements-hybrid.txt como nombre canonico.

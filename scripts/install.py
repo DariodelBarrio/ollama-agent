@@ -2,8 +2,9 @@
 
 Uso:
   python scripts/install.py               # instala requirements.txt
-  python scripts/install.py --mega        # instala requirements-mega.txt
-  python scripts/install.py --file path   # instala desde un requirements específico
+  python scripts/install.py --hybrid      # instala requirements-hybrid.txt
+  python scripts/install.py --mega        # alias legado de --hybrid
+  python scripts/install.py --file path   # instala desde un requirements especifico
 """
 from __future__ import annotations
 
@@ -27,15 +28,20 @@ def pip_install(requirements_file: Path) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Instalador multiplataforma de dependencias")
-    parser.add_argument("--mega", action="store_true", help="Instala requirements-mega.txt")
-    parser.add_argument("--file", type=Path, default=None,
-                        help="Ruta a un requirements.txt específico (anula --mega)")
+    parser.add_argument("--hybrid", action="store_true", help="Instala requirements-hybrid.txt")
+    parser.add_argument("--mega", action="store_true", help="Alias legado de --hybrid")
+    parser.add_argument(
+        "--file",
+        type=Path,
+        default=None,
+        help="Ruta a un requirements.txt especifico (anula --hybrid/--mega)",
+    )
     args = parser.parse_args()
 
     if args.file:
         requirements_file = args.file.resolve()
-    elif args.mega:
-        requirements_file = REPO_ROOT / "requirements-mega.txt"
+    elif args.hybrid or args.mega:
+        requirements_file = REPO_ROOT / "requirements-hybrid.txt"
     else:
         requirements_file = REPO_ROOT / "requirements.txt"
 

@@ -1,293 +1,138 @@
-# Ollama Agent — Agente de Programación Local
+# Ollama Agent
 
-Agente autónomo de programación 100% local con [Ollama](https://ollama.com) y backend compatible con OpenAI. Réplica las capacidades principales de asistentes como Claude Code sin costos de API.
+Agente de codigo para backends OpenAI-compatible con dos variantes del mismo producto:
 
-![Python](https://img.shields.io/badge/Python-3.9+-blue) ![OpenAI API](https://img.shields.io/badge/OpenAI--compatible-API-green) ![CUDA](https://img.shields.io/badge/CUDA-12.x-76B900) ![License](https://img.shields.io/badge/license-MIT-blue)
+- `src/agent.py`: local-first, simple y rapido.
+- `src/hybrid/agent.py`: local + cloud, critic mode, router y memoria.
 
----
+La ruta canonica del producto hibrido ahora es `src/hybrid`. `IA/MEGA` queda solo como shim legado de transicion.
 
-## Proyectos
+![Python](https://img.shields.io/badge/Python-3.9+-blue) ![OpenAI API](https://img.shields.io/badge/OpenAI--compatible-API-green) ![License](https://img.shields.io/badge/license-MIT-blue)
 
-### `src/agent.py` — Agente local
+## Comparacion frontal
 
-Agente estándar que corre contra Ollama (o cualquier backend OpenAI-compatible).
+| Producto | Local | Offline | Tool calling | Multi-backend | Critic mode | AST scan | Safety sandbox | UI | Coste |
+|---|---|---:|---:|---:|---:|---:|---|---|---|
+| Ollama Agent | Si | Si en modo local | Si | Si | Si en `src/hybrid` | Si en `src/hybrid` | Parcial: blocklist + root guard | TUI | Bajo / 0 si usas Ollama |
+| Aider | Si | Parcial | No nativo tipo function calling | Si | No | No | Parcial | CLI | API o local |
+| OpenCode | Si | Depende del backend | Si | Si | No nativo | No | Parcial | CLI/TUI | Variable |
+| Claude Code | No local real | No | Si | No | No publico | No publico | Fuerte, gestionada por proveedor | TUI | API/suscripcion |
+| Codex CLI | No local real | No | Si | No | No publico | No publico | Fuerte, gestionada por proveedor | CLI | API |
 
-**Características:**
-- 13 herramientas — archivos, shell, web, grep, directorios, mover/renombrar, cambio de directorio
-- Modos de trabajo: `/mode code` (temp 0.05) · `/mode architect` (0.7) · `/mode research` (0.3)
-- Streaming con detección de bloques `<think>` y `<thought>`
-- Autocorrección — reintenta hasta 3 veces con enfoque diferente ante errores
-- Menú interactivo de selección de modelo al arrancar
-- Seguridad básica — bloquea comandos destructivos comunes y restringe operaciones al `work_dir`
-- Compatible con Ollama, vLLM, LMDeploy y LM Studio vía `--api-base`
+`Safety sandbox` aqui significa lo que el producto expone por defecto al agente, no una comparativa formal de seguridad entre vendors.
 
-### `IA/MEGA/agent.py` — Agente híbrido dual-brain
+## Variantes
 
-Agente avanzado con GPU local + Groq cloud. Router inteligente que decide el backend según la complejidad del prompt.
+### Local
 
-**Características adicionales:**
-- SmartRouter — enruta automáticamente entre GPU local y Groq (128k ctx)
-- Actor-Crítico — revisa el código generado con un segundo pase (flag `--critic`)
-- Self-healing — inyecta contexto de error en el historial y reintenta hasta 3 veces
-- Comandos `/slash` — `/help`, `/clear`, `/switch`, `/model`, `/ctx`, `/scan`, `/stats`
-- Escáner AST — extrae esqueleto de clases, métodos y funciones del proyecto
-- Seguridad — bloquea comandos destructivos (`rm`, `del`, `format`, `shutdown`, etc.)
-- Rutas restringidas al work_dir — `change_directory` no puede salir del directorio raíz
-- `prompt_toolkit` — historial persistente y autocompletado en el prompt
+`python src/agent.py`
 
----
+- Backend OpenAI-compatible local o remoto.
+- Modos `code`, `architect`, `research`.
+- Tool calling para archivos, shell, web y navegacion de proyecto.
 
-## Herramientas
+### Hybrid
 
-| Herramienta | Descripción |
-|-------------|-------------|
-| `run_command` | PowerShell / bash (filtra comandos destructivos en MEGA) |
-| `read_file` | Lee archivos con números de línea |
-| `write_file` | Crea archivos nuevos |
-| `edit_file` | Edita texto exacto (soporta regex y replace_all) |
-| `find_files` | Busca por patrón glob |
-| `grep` | Busca texto/regex en el proyecto |
-| `list_directory` | Lista carpetas |
-| `delete_file` | Elimina archivos o carpetas (recursivo) |
-| `create_directory` | Crea carpetas y subcarpetas |
-| `move_file` | Mueve o renombra archivos/carpetas |
-| `change_directory` | Cambia el directorio de trabajo activo |
-| `search_web` | DuckDuckGo para información actual |
-| `fetch_url` | Descarga y lee URLs |
+`python src/hybrid/agent.py`
 
----
+- Router entre backend local y Groq.
+- Critic mode con segunda pasada local.
+- AST scan del proyecto.
+- Memoria persistente SQLite.
+- Slash commands de sesion.
 
-## Requisitos
-
-- Python 3.9+
-- [Ollama](https://ollama.com/download) instalado y corriendo
-- NVIDIA GPU con CUDA (recomendado, funciona en CPU)
-- Windows 10/11
-
----
-
-## Instalación
+## Instalacion
 
 ```bash
 git clone https://github.com/DariodelBarrio/ollama-agent.git
 cd ollama-agent
 python scripts/install.py
-
-# Para MEGA (añade sglang/vllm y extras)
-python scripts/install.py --mega
+python scripts/install.py --hybrid
 ```
 
-Instalación manual:
+Archivos de dependencias:
+
+- `requirements.txt`
+- `requirements-hybrid.txt`
+- `requirements-mega.txt` es alias legado de compatibilidad
+
+## Uso rapido
 
 ```bash
-pip install -r requirements.txt               # agente estándar
-pip install -r requirements-mega.txt         # MEGA
-```
-
----
-
-## Uso
-
-### `src/agent.py`
-
-```bash
-# Menú interactivo de modelos
-python src/agent.py
-
-# Modelo y directorio específico
 python src/agent.py --model qwen2.5-coder:14b --dir "C:\mi\proyecto"
-
-# Backend alternativo (vLLM, LMDeploy, LM Studio)
-python src/agent.py --model mistral --api-base http://localhost:8000/v1
+python src/hybrid/agent.py --model qwen2.5-coder:14b --dir "C:\mi\proyecto" --backend auto --critic
 ```
 
-**Argumentos:**
+Launchers Windows limpios:
 
-| Argumento | Default | Descripción |
-|-----------|---------|-------------|
-| `--model` | menú interactivo | Modelo a usar |
-| `--dir` | `.` | Directorio de trabajo |
-| `--tag` | `AGENTE` | Nombre en el header |
-| `--ctx` | `16384` | Ventana de contexto en tokens |
-| `--temp` | `0.15` | Temperatura |
-| `--api-base` | `http://localhost:11434/v1` | URL base API (Ollama/vLLM/LMDeploy/LM Studio) |
-| `--system-prompt` | `None` | Archivo opcional con prompt de sistema (acepta {work_dir}, {project_context}, {mode}, {mode_snippet}) |
+- `src/hybrid/windows/local-coder.bat`
+- `src/hybrid/windows/local-reasoner.bat`
+- `src/hybrid/windows/critic.bat`
+- `src/hybrid/windows/groq-cloud.bat`
+- `src/hybrid/windows/install-deps.bat`
 
-**Comandos de sesión:**
+## Demos
 
-| Comando | Acción |
-|---------|--------|
-| `salir` / `exit` / `quit` | Termina el agente |
-| `limpiar` / `clear` / `reset` | Reinicia el historial |
-| `/mode [code\|architect\|research]` | Cambia el modo de trabajo |
+- Flujo paso a paso: [docs/demo-flow.md](/C:/Users/dapio/Documents/ollama/docs/demo-flow.md)
+- Captura actual de la UI: [docs/screenshot.png](/C:/Users/dapio/Documents/ollama/docs/screenshot.png)
 
-Prompt externo: pasa `--system-prompt ruta/al/archivo.md` para cargar tus propias reglas. Ejemplo en `prompts/system_prompt.example.md`.
+El repo ya documenta el flujo `prompt -> accion -> diff -> resultado`. No he añadido un GIF nuevo al repo porque no habia una grabacion reproducible en esta maquina.
 
-### `IA/MEGA/agent.py`
+## Benchmark
 
-```bash
-# Local GPU (Ollama)
-python agent.py --model qwen2.5-coder:14b --dir "C:\mi\proyecto"
+- Benchmark y metodologia: [docs/benchmark.md](/C:/Users/dapio/Documents/ollama/docs/benchmark.md)
 
-# Forzar Groq cloud
-python agent.py --model llama-3.3-70b-versatile --backend groq
+El benchmark esta definido sobre 3 tareas y con formato reproducible. No se han inventado numeros donde no habia herramientas instaladas o ejecucion reproducible.
 
-# Router automático + Actor-Crítico
-python agent.py --model qwen2.5-coder:14b --backend auto --critic
-```
+## Seguridad
 
-**Argumentos:**
+Resumen:
 
-| Argumento | Default | Descripción |
-|-----------|---------|-------------|
-| `--model` | menú interactivo | Modelo local o Groq |
-| `--dir` | `.` | Directorio de trabajo |
-| `--backend` | `auto` | `local`, `groq` o `auto` (router) |
-| `--local-url` | `http://localhost:11434/v1` | URL del servidor local |
-| `--groq-model` | `llama-3.3-70b-versatile` | Modelo de Groq |
-| `--ctx` | `32768` | Ventana de contexto |
-| `--temp` | `0.15` | Temperatura |
-| `--critic` | off | Activa modo Actor-Crítico |
-| `--system-prompt` | `None` | Archivo opcional con prompt de sistema (acepta {work_dir}, {project_context}, {memories}) |
+- Las operaciones de fichero pasan por `resolve_in_root()`.
+- Las rutas se resuelven con `Path.resolve()`, asi que los symlinks que escapan del root quedan bloqueados.
+- Las rutas absolutas solo se permiten si, una vez resueltas, siguen dentro de `ROOT_DIR`.
+- `change_directory()` no puede sacar al agente fuera del root del workspace.
+- `run_command()` filtra una blocklist de comandos destructivos y pipelines peligrosos.
+- Esto no es un sandbox de SO ni un contenedor. Es una capa de guardas de aplicacion.
 
-**Comandos /slash de MEGA:**
+Detalle completo: [docs/security.md](/C:/Users/dapio/Documents/ollama/docs/security.md)
 
-| Comando | Acción |
-|---------|--------|
-| `/help` | Muestra todos los comandos |
-| `/clear` | Reinicia el historial |
-| `/switch [local\|groq\|auto]` | Fuerza o libera el backend |
-| `/model [nombre]` | Muestra o cambia el modelo activo |
-| `/ctx` | Muestra tokens de contexto usados |
-| `/scan` | Escanea la estructura AST del proyecto |
-| `/stats` | Estadísticas de llamadas al router |
+## Estructura
 
-Prompt externo: `--system-prompt ruta/al/archivo.md` (usa {work_dir}, {project_context}, {memories}).
-
-**Launchers .bat incluidos:**
-
-```
-IA/MEGA/
-├── SONNET [qwen2.5-coder - Coding RTX5070].bat
-├── OPUS [deepseek-r1 - Razonamiento profundo].bat
-├── CRITICO [qwen3 - Actor-Critico activado].bat
-├── GEMINI [gemini-2.0-flash - Nube inteligente].bat   ← ahora usa Groq
-└── INSTALAR DEPENDENCIAS.bat
-```
-
-Para usar Groq, define la API key (gratuita en [console.groq.com](https://console.groq.com)):
-
-```powershell
-setx GROQ_API_KEY tu_clave
-```
-
----
-
-## Modelos recomendados
-
-### Local (RTX 5070 / 12 GB VRAM)
-
-| Modelo | VRAM | Uso |
-|--------|------|-----|
-| `qwen2.5-coder:14b` | ~8.5 GB | Mejor coder, todo en GPU |
-| `deepseek-r1:14b` | ~8.5 GB | Razonamiento profundo |
-| `qwen2.5-coder:32b` | ~12+7 GB RAM | Máxima calidad (offload parcial) |
-| `mistral-nemo:12b` | ~7.5 GB | General + multilingüe |
-| `dolphin3:8b` | ~5 GB | Sin censura, rápido |
-
-### Groq cloud (gratis)
-
-| Modelo | Contexto | Uso |
-|--------|----------|-----|
-| `llama-3.3-70b-versatile` | 128k | Más capaz, general |
-| `deepseek-r1-distill-llama-70b` | 128k | Thinking model |
-| `qwen-qwq-32b` | 128k | Alternativa razonamiento |
-| `llama-3.1-8b-instant` | 128k | Rápido, tareas simples |
-
----
-
-## Configuración GPU
-
-Variables de entorno (incluidas en los `.bat`):
-
-```bash
-set OLLAMA_NUM_GPU=999          # todas las capas en GPU
-set OLLAMA_KEEP_ALIVE=-1        # modelo siempre cargado en VRAM
-set CUDA_VISIBLE_DEVICES=0      # GPU primaria
-set OLLAMA_KV_CACHE_TYPE=q8_0   # KV cache cuantizado (mitad de VRAM)
-```
-
-Para configurarlas permanentemente:
-
-```powershell
-setx OLLAMA_NUM_GPU 999
-setx OLLAMA_KEEP_ALIVE -1
-setx CUDA_VISIBLE_DEVICES 0
-setx OLLAMA_KV_CACHE_TYPE q8_0
-```
-
----
-
-## Contexto por modelo y GPU
-
-| Tamaño modelo | VRAM modelo | Contexto recomendado |
-|---------------|-------------|----------------------|
-| 7b / 8b | ~5 GB | 32768 (32K) |
-| 14b | ~8.5 GB | 8192–16384 |
-| 32b | ~12 GB + RAM | 8192 |
-
-Con `OLLAMA_KV_CACHE_TYPE=q8_0` el KV cache ocupa la mitad — permite subir el contexto o liberar VRAM para el modelo.
-
----
-
-## Estructura del proyecto
-
-```
+```text
 ollama-agent/
 ├── src/
-│   └── agent.py                  # Agente local (OpenAI-compatible API)
-├── IA/
-│   ├── MEGA/                     # Agente híbrido dual-brain
-│   │   ├── agent.py              # Local GPU + Groq, router, crítico, AST
-│   │   ├── SONNET *.bat
-│   │   ├── OPUS *.bat
-│   │   ├── CRITICO *.bat
-│   │   ├── GEMINI *.bat          # Groq cloud
-│   │   └── INSTALAR DEPENDENCIAS.bat
-│   └── sin censura/              # Bats modelos sin restricciones
-├── config/
-│   ├── Modelfile.sonnet
-│   ├── Modelfile.opus
-│   └── CONSTRUIR MODELOS.bat
+│   ├── agent.py
+│   └── hybrid/
+│       ├── __init__.py
+│       ├── agent.py
+│       └── windows/
+│           ├── local-coder.bat
+│           ├── local-reasoner.bat
+│           ├── critic.bat
+│           ├── groq-cloud.bat
+│           └── install-deps.bat
+├── common_runtime.py
+├── common_tool_schemas.py
+├── common_tools.py
 ├── docs/
-│   └── screenshot.png
-├── requirements.txt
-└── README.md
+├── prompts/
+└── tests/
 ```
 
----
+## Branding
 
-## Dependencias
+Regla actual:
 
-```
-openai
-rich
-prompt_toolkit
-duckduckgo-search
-requests
-beautifulsoup4
-pydantic
-```
-
----
+- `Ollama Agent` es el nombre del producto.
+- `Local` y `Hybrid` son variantes.
+- Se eliminan nombres de marketing mezclados como `MEGA`, `SONNET`, `OPUS` o `GEMINI` de la ruta principal y de los launchers canonicos.
 
 ## Tests
 
 ```bash
 py -3 -m unittest discover -s tests -p "test_*.py"
 ```
-
----
 
 ## Licencia
 

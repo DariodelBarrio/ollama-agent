@@ -17,7 +17,7 @@ def load_module(name: str, relative_path: str):
 
 
 src_agent = load_module("src_agent", "src/agent.py")
-mega_agent = load_module("mega_agent", "IA/MEGA/agent.py")
+hybrid_agent = load_module("hybrid_agent", "src/hybrid/agent.py")
 
 
 class SrcAgentSafetyTests(unittest.TestCase):
@@ -40,24 +40,24 @@ class SrcAgentSafetyTests(unittest.TestCase):
         self.assertIn("codex_test", result["stdout"].lower())
 
 
-class MegaAgentSafetyTests(unittest.TestCase):
+class HybridAgentSafetyTests(unittest.TestCase):
     def setUp(self):
-        mega_agent.ROOT_DIR = str(ROOT)
-        mega_agent.WORK_DIR = str(ROOT)
+        hybrid_agent.ROOT_DIR = str(ROOT)
+        hybrid_agent.WORK_DIR = str(ROOT)
 
     def test_resolve_rejects_paths_outside_root(self):
         with self.assertRaises(ValueError):
-            mega_agent._resolve(str(ROOT.parent / "fuera.txt"))
+            hybrid_agent._resolve(str(ROOT.parent / "fuera.txt"))
 
     def test_run_command_blocks_dangerous_cmd(self):
-        result = mega_agent.run_command("cmd /c del archivo.txt", shell="cmd", timeout=5)
+        result = hybrid_agent.run_command("cmd /c del archivo.txt", shell="cmd", timeout=5)
         self.assertIn("error", result)
         self.assertIn("bloqueado", result["error"].lower())
 
     def test_memory_db_sets_timestamps(self):
         temp_dir = tempfile.mkdtemp()
         db_path = Path(temp_dir) / "memory.db"
-        db = mega_agent.MemoryDB(db_path)
+        db = hybrid_agent.MemoryDB(db_path)
         saved = db.save("k", "v", category="fact")
         self.assertTrue(saved.get("success"))
         with sqlite3.connect(db_path) as conn:
@@ -72,7 +72,7 @@ class MegaAgentSafetyTests(unittest.TestCase):
         gc.collect()
 
     def test_validate_tool_args_rejects_missing_required_arg(self):
-        agent = mega_agent.Agent.__new__(mega_agent.Agent)
+        agent = hybrid_agent.Agent.__new__(hybrid_agent.Agent)
         agent.logger = type("L", (), {"error": lambda *a, **k: None})()
         result = agent._validate_tool_args("read_file", {})
         self.assertIn("error", result)

@@ -519,7 +519,7 @@ pdf.section_title("6. Modelos Disponibles")
 
 pdf.section_title("Con restricciones — IA/con censura/", level=2)
 pdf.model_card(
-    tag="SONNET",
+    tag="LOCAL",
     model="qwen2.5-coder:7b  [100% GPU]",
     pill_label="  Rapido y Preciso  ",
     pill_fg=BLANCO, pill_bg=NARANJA,
@@ -534,7 +534,7 @@ pdf.model_card(
 )
 
 pdf.model_card(
-    tag="OPUS",
+    tag="REASONER",
     model="deepseek-r1:14b",
     pill_label="  Razonamiento Profundo  ",
     pill_fg=BLANCO, pill_bg=VERDE,
@@ -627,10 +627,11 @@ ollama/
 |   +-- documentacion_agente_local.pdf    # Este documento
 +-- scripts/
 |   +-- generar_pdf.py                    # Regenera la documentacion
-+-- IA/
-|   +-- con censura/
-|   |   +-- SONNET [qwen2.5-coder - Rapido y preciso].bat
-|   |   +-- OPUS [deepseek-r1 - Razonamiento profundo].bat
++-- src/
+|   +-- hybrid/
+|   |   +-- windows/
+|   |   |   +-- local-coder.bat
+|   |   |   +-- local-reasoner.bat
 |   +-- sin censura/
 |       +-- DOLPHIN [dolphin3 - Sin censura rapido].bat
 |       +-- HERMES [hermes3 - Sin censura preciso].bat
