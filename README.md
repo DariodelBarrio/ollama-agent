@@ -56,6 +56,20 @@ Archivos de dependencias:
 - `requirements-hybrid.txt`
 - `requirements-mega.txt` es alias legado de compatibilidad
 
+## Demo rapida en 60 segundos
+
+```bash
+git clone https://github.com/DariodelBarrio/ollama-agent.git
+cd ollama-agent
+python src/agent.py --model qwen2.5-coder:14b --dir .
+```
+
+Si quieres la variante hibrida:
+
+```bash
+python src/hybrid/agent.py --model qwen2.5-coder:14b --dir . --backend auto --critic
+```
+
 ## Uso rapido
 
 ```bash
@@ -96,6 +110,15 @@ Resumen:
 - Esto no es un sandbox de SO ni un contenedor. Es una capa de guardas de aplicacion.
 
 Detalle completo: [docs/security.md](/C:/Users/dapio/Documents/ollama/docs/security.md)
+
+## Limitaciones actuales
+
+- La sandbox es de aplicacion, no de sistema operativo. No sustituye un contenedor o una VM.
+- La proteccion de shell usa blocklist; reduce riesgo, pero no demuestra seguridad completa.
+- El benchmark frente a Aider/OpenCode esta definido, pero aun no incluye resultados cerrados y reproducibles para todas las herramientas.
+- La demo visual esta documentada, pero el repo todavia no incluye un GIF/video corto definitivo.
+- La variante `IA/MEGA` sigue existiendo como compatibilidad de transicion; la ruta canonica ya es `src/hybrid`.
+- El producto sigue en fase temprana y la release inicial debe leerse como `v0.1.0`, no como API o UX estable.
 
 ## Estructura
 
