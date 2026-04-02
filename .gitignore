@@ -25,6 +25,11 @@ Desktop.ini
 
 # Claude Code
 .claude/
+.codex/
+codex-activity.log
+*.activity.log
+*codex*activity*.log
+*claude*activity*.log
 
 # Docs generados (regenerables)
 docs/*.pdf
