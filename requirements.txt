@@ -2,6 +2,7 @@ ollama
 openai
 rich
 pydantic
+jinja2
 duckduckgo-search
 requests
 beautifulsoup4

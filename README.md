@@ -6,6 +6,7 @@ Agente de codigo para backends OpenAI-compatible con dos variantes del mismo pro
 - `src/hybrid/agent.py`: local + cloud, critic mode, router y memoria.
 
 La ruta canonica del producto hibrido ahora es `src/hybrid`. `IA/MEGA` queda solo como shim legado de transicion.
+Los prompts base viven en `prompts/` y se renderizan en tiempo de ejecucion.
 
 ![Python](https://img.shields.io/badge/Python-3.9+-blue) ![OpenAI API](https://img.shields.io/badge/OpenAI--compatible-API-green) ![License](https://img.shields.io/badge/license-MIT-blue)
 
@@ -85,6 +86,14 @@ Launchers Windows limpios:
 - `src/hybrid/windows/groq-cloud.bat`
 - `src/hybrid/windows/install-deps.bat`
 
+Launchers Unix equivalentes:
+
+- `src/hybrid/unix/local-coder.sh`
+- `src/hybrid/unix/local-reasoner.sh`
+- `src/hybrid/unix/critic.sh`
+- `src/hybrid/unix/groq-cloud.sh`
+- `src/hybrid/unix/install-deps.sh`
+
 ## Demos
 
 - Flujo paso a paso: [docs/demo-flow.md](/C:/Users/dapio/Documents/ollama/docs/demo-flow.md)
@@ -119,6 +128,7 @@ Detalle completo: [docs/security.md](/C:/Users/dapio/Documents/ollama/docs/secur
 - La demo visual esta documentada, pero el repo todavia no incluye un GIF/video corto definitivo.
 - La variante `IA/MEGA` sigue existiendo como compatibilidad de transicion; la ruta canonica ya es `src/hybrid`.
 - El producto sigue en fase temprana y la release inicial debe leerse como `v0.1.0`, no como API o UX estable.
+- En Linux/macOS puede que necesites `chmod +x src/hybrid/unix/*.sh` antes del primer uso.
 
 ## Estructura
 

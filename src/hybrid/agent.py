@@ -5,16 +5,36 @@ Router inteligente · Self-healing · Actor-Crítico · TUI profesional · Coman
 
 Uso: python agent.py [--model MODEL] [--dir DIR] [--backend local|groq|auto]
      [--local-url URL] [--groq-model MODEL] [--ctx N] [--temp F] [--critic] [--tag TAG]
+     [--sandbox docker] [--sandbox-image IMAGE]
 """
 import json, os, re, sys, time, argparse, threading, logging, sqlite3, inspect
 from contextlib import closing, contextmanager
 from datetime import datetime, timezone
-from functools import wraps
 from pathlib import Path
 from typing import Optional
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from common_tools import WEB_AVAILABLE, ToolRuntime, build_tool_definitions
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from agent_prompting import build_system_prompt as render_shared_prompt
+from agent_prompting import load_project_context
+from common_tools import WEB_AVAILABLE, build_tool_definitions
+
+# ── Shared base: colors, console, logger, tools, UI helpers ───────────────────
+from base_agent import (
+    C_PROMPT, C_BULLET, C_TOOL, C_TOOLARG, C_OK, C_ERR, C_DIM,
+    C_LOGO, C_BORDER, C_TEXT, C_ROUTER, C_CRITIC,
+    console,
+    _JsonFmt, make_logger as _make_logger,
+    sync_work_dir, get_work_dir,
+    run_command, read_file, write_file, edit_file, find_files, grep,
+    list_directory, delete_file, create_directory, move_file,
+    search_web, fetch_url, change_directory,
+    BASE_TOOL_MAP, BASE_TOOLS,
+    _render_inline, _TOOL_LABELS, _rel,
+    print_tool_call, print_tool_result,
+)
 
 try:
     from openai import OpenAI
@@ -22,7 +42,6 @@ except ImportError:
     print("pip install openai"); sys.exit(1)
 
 try:
-    from rich.console import Console
     from rich.live import Live
     from rich.spinner import Spinner
     from rich.text import Text
@@ -49,48 +68,7 @@ try:
 except ImportError:
     PYAST = False
 
-console = Console()
 _SCRIPT_DIR = Path(__file__).parent
-
-# Colores
-C_PROMPT = "#5B9BD5"
-C_BULLET = "#4EC9B0"
-C_TOOL = "#C586C0"
-C_TOOLARG = "#9CDCFE"
-C_OK = "#6A9955"
-C_ERR = "#F44747"
-C_DIM = "#6E7681"
-C_LOGO = "#E8643B"
-C_BORDER = "#30363D"
-C_TEXT = "#D4D4D4"
-C_ROUTER = "#FFD700"
-C_CRITIC = "#FF8C00"
-
-
-class _JsonFmt(logging.Formatter):
-    def format(self, record):
-        payload = {
-            "ts": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
-            "level": record.levelname,
-            "msg": record.getMessage(),
-        }
-        for key in ("user_input", "assistant_response", "tool_name", "tool_args", "tool_result", "error_details"):
-            if hasattr(record, key):
-                payload[key] = getattr(record, key)
-        if record.exc_info:
-            payload["exc"] = self.formatException(record.exc_info)
-        return json.dumps(payload, ensure_ascii=False)
-
-
-def _make_logger(name, path):
-    logger = logging.getLogger(name)
-    logger.setLevel(logging.DEBUG)
-    logger.propagate = False
-    if not logger.handlers:
-        handler = logging.FileHandler(path, encoding="utf-8")
-        handler.setFormatter(_JsonFmt())
-        logger.addHandler(handler)
-    return logger
 
 
 @contextmanager
@@ -138,64 +116,7 @@ class SmartRouter:
     def stats(self) -> str:
         return f"local:{self.calls['local']}  groq:{self.calls['groq']}"
 
-# Herramientas compartidas
-WORK_DIR = "."
-ROOT_DIR = str(Path(".").resolve())
-_TOOL_RUNTIME = ToolRuntime(WORK_DIR, ROOT_DIR)
-
-
-def _sync_tool_runtime() -> None:
-    _TOOL_RUNTIME.set_workspace(WORK_DIR, ROOT_DIR)
-
-
-def _sync_tool_globals() -> None:
-    global WORK_DIR, ROOT_DIR
-    WORK_DIR = _TOOL_RUNTIME.work_dir
-    ROOT_DIR = _TOOL_RUNTIME.root_dir
-
-
-def _is_within_root(path: Path) -> bool:
-    _sync_tool_runtime()
-    try:
-        path.resolve().relative_to(Path(ROOT_DIR).resolve())
-        return True
-    except ValueError:
-        return False
-
-
-def _wrap_tool(method_name: str):
-    method = getattr(_TOOL_RUNTIME, method_name)
-
-    @wraps(method)
-    def _wrapped(*args, **kwargs):
-        _sync_tool_runtime()
-        result = getattr(_TOOL_RUNTIME, method_name)(*args, **kwargs)
-        _sync_tool_globals()
-        return result
-
-    return _wrapped
-
-
-def _resolve(path: str) -> Path:
-    _sync_tool_runtime()
-    resolved = _TOOL_RUNTIME.resolve(path)
-    _sync_tool_globals()
-    return resolved
-
-
-run_command = _wrap_tool("run_command")
-read_file = _wrap_tool("read_file")
-write_file = _wrap_tool("write_file")
-edit_file = _wrap_tool("edit_file")
-find_files = _wrap_tool("find_files")
-grep = _wrap_tool("grep")
-list_directory = _wrap_tool("list_directory")
-delete_file = _wrap_tool("delete_file")
-create_directory = _wrap_tool("create_directory")
-move_file = _wrap_tool("move_file")
-search_web = _wrap_tool("search_web")
-fetch_url = _wrap_tool("fetch_url")
-change_directory = _wrap_tool("change_directory")
+# Tool map (base tools + memory tools added after MemoryDB is defined)
 
 
 # Memoria Persistente SQLite + FTS5 ────────────────────────────────────────
@@ -383,12 +304,10 @@ def detect_keyword_mode(text: str) -> tuple[str, str]:
 
 
 TOOL_MAP = {
-    "run_command": run_command, "read_file": read_file, "write_file": write_file,
-    "edit_file": edit_file, "find_files": find_files, "grep": grep,
-    "list_directory": list_directory, "delete_file": delete_file,
-    "create_directory": create_directory, "move_file": move_file,
-    "search_web": search_web, "fetch_url": fetch_url, "change_directory": change_directory,
-    "save_memory": save_memory, "memory_search": memory_search, "delete_memory": delete_memory,
+    **BASE_TOOL_MAP,
+    "save_memory": save_memory,
+    "memory_search": memory_search,
+    "delete_memory": delete_memory,
 }
 
 TOOLS = build_tool_definitions(
@@ -452,89 +371,8 @@ def scan_project_ast(work_dir: str, max_files: int = 30) -> str:
 
 
 # ── UI ────────────────────────────────────────────────────────────────────────
-_TOOL_LABELS = {
-    "edit_file":("Update","path"), "write_file":("Write","path"), "read_file":("Read","path"),
-    "run_command":("Bash","command"), "find_files":("Glob","pattern"), "grep":("Grep","pattern"),
-    "list_directory":("LS","path"), "delete_file":("Delete","path"), "create_directory":("Mkdir","path"),
-    "move_file":("Move","src"), "search_web":("Web","query"), "fetch_url":("Fetch","url"),
-    "change_directory":("CD","path"), "save_memory":("Memory+","key"),
-    "memory_search":("MemSearch","query"), "delete_memory":("Memory-","key"),
-}
-
-def _rel(s: str) -> str:
-    try: return str(Path(s).relative_to(Path(WORK_DIR)))
-    except ValueError: return s
-
-def _render_inline(text: str) -> Text:
-    result = Text(); i = 0
-    while i < len(text):
-        if text[i] == "`":
-            j = text.find("`", i+1)
-            if j != -1: result.append(text[i+1:j], style=f"bold {C_TOOLARG}"); i = j+1; continue
-        if text[i:i+2] == "**":
-            j = text.find("**", i+2)
-            if j != -1: result.append(text[i+2:j], style="bold white"); i = j+2; continue
-        result.append(text[i], style=C_TEXT); i += 1
-    return result
-
-def print_tool_call(name: str, args: dict):
-    t = Text()
-    if name in _TOOL_LABELS:
-        label, key = _TOOL_LABELS[name]; val = _rel(str(args.get(key, "")))[:90]
-        t.append("● ", style=f"bold {C_BULLET}"); t.append(label, style=f"bold {C_TOOL}")
-        t.append("(", style=C_DIM); t.append(val, style=C_TOOLARG); t.append(")", style=C_DIM)
-    else:
-        t.append("● ", style=f"bold {C_BULLET}"); t.append(name, style=f"bold {C_TOOL}")
-        t.append("(" + ", ".join(f"{k}={repr(v)[:60]}" for k, v in args.items()) + ")", style=C_TOOLARG)
-    console.print(t)
-
-def _print_diff(result: dict):
-    la = result.get("added", 0); lr = result.get("removed", 0)
-    s = Text(); s.append("  └ ", style=C_DIM)
-    parts = []
-    if la: parts.append(Text(f"+{la}", style=C_OK))
-    if lr: parts.append(Text(f"-{lr}", style=C_ERR))
-    for i, p in enumerate(parts):
-        if i: s.append("  ", style=C_DIM)
-        s.append_text(p)
-    console.print(s)
-    for ln, kind, content in result.get("diff", []):
-        row = Text(overflow="fold")
-        if kind == "removed":
-            row.append(f"{ln:4} ", style=C_DIM); row.append("- ", style=f"bold {C_ERR}")
-            row.append(f"  {content}", style=f"{C_ERR} on #2d0000")
-        elif kind == "added":
-            row.append(f"{ln:4} ", style=C_DIM); row.append("+ ", style=f"bold {C_OK}")
-            row.append(f"  {content}", style=f"{C_OK} on #002d00")
-        else:
-            row.append(f"{ln:4}   ", style=C_DIM); row.append(f"  {content}", style=C_DIM)
-        console.print(row)
-
-def print_tool_result(result: dict):
-    t = Text()
-    if "error" in result: t.append("  ✗ " + result["error"], style=C_ERR)
-    elif "diff" in result: _print_diff(result); return
-    elif "stdout" in result:
-        out = result.get("stdout",""); err = result.get("stderr",""); rc = result.get("returncode",0)
-        t.append("  ✓ ", style=C_OK)
-        if out: t.append(out[:1200] + ("…" if len(out)>1200 else ""), style=C_TEXT)
-        if err: t.append(f"\n    stderr: {err}", style=C_ERR)
-        if rc != 0: t.append(f"  [rc={rc}]", style=C_ERR)
-    elif "content" in result and "url" in result:
-        t.append(f"  ✓ {result.get('chars',0)} chars · {result['url'][:60]}", style=C_DIM)
-    elif "content" in result:
-        t.append(f"  ✓ {result['lines']} líneas · {result['path']}", style=C_DIM)
-    elif "query" in result and "results" in result:
-        t.append(f"  ✓ {len(result['results'])} resultados: {result['query']}\n", style=C_DIM)
-        for r in result["results"][:3]:
-            t.append(f"    · {r.get('title','')[:70]}\n", style=C_TEXT)
-    elif "files" in result: t.append(f"  ✓ {len(result['files'])} archivos", style=C_DIM)
-    elif "results" in result: t.append(f"  ✓ {len(result['results'])} coincidencias", style=C_DIM)
-    elif "cwd" in result: t.append(f"  ✓ dir → {result['cwd']}", style=C_TOOLARG)
-    elif "success" in result:
-        t.append("  ✓ " + (result.get("to") or result.get("path") or "ok"), style=C_DIM)
-    else: t.append("  ✓ ok", style=C_DIM)
-    console.print(t)
+# _render_inline, _TOOL_LABELS, _rel, print_tool_call, print_tool_result
+# are imported from base_agent at the top of this file.
 
 def print_header(model: str, backend: str, work_dir: str, tag: str, ctx: int, temp: float, router: SmartRouter):
     console.print()
@@ -569,104 +407,28 @@ SLASH_HELP = """[bold]Comandos disponibles:[/]
 # ── System Prompt ─────────────────────────────────────────────────────────────
 def build_system_prompt(work_dir: str, project_context: str, memories: str = "") -> str:
     desktop = str(Path.home() / "Desktop")
-    return f"""Eres un agente autónomo de programación de nivel profesional. Directorio de trabajo: {work_dir}
-Escritorio del usuario: {desktop}
-
-{project_context}
-{memories}
-═══════════════════════════════════════════════════════
-REGLA #0 — CUÁNDO NO USAR HERRAMIENTAS
-═══════════════════════════════════════════════════════
-Para saludos, preguntas generales y conversación casual → responde
-directamente con texto. NO uses ninguna herramienta.
-Ejemplos que NO requieren herramientas:
-  "hola", "¿cómo estás?", "¿qué puedes hacer?", "gracias", "explícame X"
-Las herramientas son para TAREAS concretas sobre archivos, código o terminal.
-
-═══════════════════════════════════════════════════════
-REGLA #1 — NUNCA DIGAS AL USUARIO QUÉ HACER — HAZLO TÚ
-═══════════════════════════════════════════════════════
-Cuando la tarea requiera acción: PROHIBIDO escribir "Puedes ejecutar:",
-"Deberías correr:", "Te recomiendo que...". Usa la herramienta directamente.
-
-═══════════════════════════════════════════════════════
-REGLA #2 — ENCADENA PASOS SIN PAUSAR NI PREGUNTAR
-═══════════════════════════════════════════════════════
-1. Llama herramientas en secuencia hasta completar la tarea.
-2. Solo reporta al final qué hiciste y el resultado.
-PROHIBIDO: "¿Quieres que continúe?", "¿Procedo?"
-
-═══════════════════════════════════════════════════════
-REGLA #3 — EDICIÓN POR DIFFS (NUNCA REESCRIBIR ENTERO)
-═══════════════════════════════════════════════════════
-SIEMPRE usa edit_file(old_text, new_text) para modificar archivos.
-PROHIBIDO reescribir un archivo completo con write_file si ya existe.
-Ventaja: preserva VRAM, evita conflictos, es reversible.
-
-═══════════════════════════════════════════════════════
-REGLA #4 — CREAR ARCHIVOS = write_file() SIEMPRE
-═══════════════════════════════════════════════════════
-Cuando el usuario pide "crea un script", "hazme un archivo", "escribe un programa":
-  → USA write_file(path, content) — NUNCA muestres el código en el chat
-  → NUNCA digas "aquí está el código" y lo pegues como texto
-
-Rutas según lo que diga el usuario:
-  "en el escritorio" → {desktop}\\nombre.py
-  "aquí" o sin indicar → ruta relativa al directorio de trabajo
-  ruta absoluta explícita → úsala tal cual
-
-═══════════════════════════════════════════════════════
-REGLA #5 — LEE ANTES DE TOCAR
-═══════════════════════════════════════════════════════
-SIEMPRE usa read_file() antes de edit_file(). Sin excepciones.
-
-═══════════════════════════════════════════════════════
-REGLA #6 — AUTO-CORRECCIÓN (SELF-HEALING)
-═══════════════════════════════════════════════════════
-Si un comando falla (rc!=0 o error en herramienta):
-  1. Lee el error COMPLETO incluyendo stderr.
-  2. Reformula tu hipótesis sobre la causa.
-  3. Ejecuta la corrección inmediatamente, sin explicar.
-  4. Hasta 3 intentos diferentes por problema.
-Solo reporta si 3 intentos distintos fallan.
-
-═══════════════════════════════════════════════════════
-RAZONAMIENTO INTERNO (Chain of Thought)
-═══════════════════════════════════════════════════════
-Antes de actuar, razona en:
-<thought>
-1. Entendimiento: [qué pide el usuario exactamente]
-2. Plan: [pasos a-b-c con herramientas y argumentos]
-3. Riesgos: [efectos secundarios posibles]
-4. Verificación: [cómo confirmaré que funcionó]
-</thought>
-El contenido de <thought> NUNCA se muestra al usuario.
-
-═══════════════════════════════════════════════════════
-ESTILO DE RESPUESTA
-═══════════════════════════════════════════════════════
-- Conciso y directo. Sin cortesías vacías.
-- ✓ "Corregido bug en main.py:42. Tests pasan."
-- ✗ "Entiendo que quieres... voy a proceder a..."
-- Responde en español.
-"""
-
-def load_project_context(work_dir: str) -> str:
-    for name in ["CLAUDE.md", "README.md", ".cursorrules"]:
-        p = Path(work_dir) / name
-        if p.exists():
-            try:
-                return f"Contexto del proyecto ({name}):\n{p.read_text(encoding='utf-8', errors='replace')[:16000]}\n"
-            except: pass
-    return ""
+    return render_shared_prompt(
+        template_name="hybrid_system_prompt.txt",
+        work_dir=work_dir,
+        logger=logging.getLogger("agent.prompt.hybrid"),
+        fallback_builder=lambda: (
+            f"Eres un agente autónomo de programación. Directorio de trabajo: {work_dir}\n"
+            "Responde en español y usa herramientas para completar tareas.\n"
+        ),
+        desktop=desktop,
+        project_context=project_context,
+        memories=memories,
+    )
 
 
 # ── Clase Agent ───────────────────────────────────────────────────────────────
 class Agent:
     def __init__(self, model: str, work_dir: str, tag: str, ctx: int, temp: float,
                  local_url: str, groq_model: str, backend: str, critic: bool,
-                 system_prompt_path: Optional[str] = None):
-        global WORK_DIR, ROOT_DIR, _mem
+                 system_prompt_path: Optional[str] = None,
+                 sandbox: Optional[str] = None,
+                 sandbox_image: str = "python:3.12-slim"):
+        global _mem
         self.model      = model
         self.work_dir   = str(Path(work_dir).resolve())
         self.tag        = tag + (" ★" if critic else "")
@@ -677,9 +439,31 @@ class Agent:
         self.critic     = critic
         self.messages: list = []
         self.system_prompt_path = Path(system_prompt_path).resolve() if system_prompt_path else None
-        WORK_DIR = self.work_dir
-        ROOT_DIR = self.work_dir
+
+        # Sync shared tool runtime to this agent's working directory
+        sync_work_dir(self.work_dir)
+
         self.selected_backend = backend if backend != "auto" else None
+
+        # Docker sandbox (optional)
+        self._sandbox = None
+        if sandbox == "docker":
+            try:
+                from sandbox import DockerSandbox, DOCKER_AVAILABLE
+                if DOCKER_AVAILABLE:
+                    self._sandbox = DockerSandbox(
+                        work_dir=self.work_dir,
+                        image=sandbox_image,
+                    )
+                    if not self._sandbox.ensure_image():
+                        console.print(f"[{C_ERR}]  ⚠ Sandbox: imagen '{sandbox_image}' no disponible — usando ejecución local.[/]")
+                        self._sandbox = None
+                    else:
+                        console.print(f"[{C_OK}]  ✓ Sandbox Docker activo ({sandbox_image})[/]")
+                else:
+                    console.print(f"[{C_ERR}]  ⚠ Docker no encontrado — usando ejecución local.[/]")
+            except ImportError:
+                console.print(f"[{C_ERR}]  ⚠ src/sandbox.py no encontrado — usando ejecución local.[/]")
 
         # Clientes OpenAI-compatible
         self.local_client = OpenAI(
@@ -710,18 +494,6 @@ class Agent:
             )
         else:
             self.pt_session = None
-
-    def _read_system_prompt_override(self) -> Optional[str]:
-        if not self.system_prompt_path:
-            return None
-        try:
-            return self.system_prompt_path.read_text(encoding="utf-8")
-        except Exception as e:
-            self.logger.error(
-                "No se pudo leer el prompt externo",
-                extra={"error_details": str(e)}
-            )
-            return None
 
     def _client_for(self, backend: str):
         if backend == "groq" and self.groq_client:
@@ -1062,6 +834,8 @@ No repitas lo que se hizo, solo señala problemas si los hay."""
 
     def _invoke_tool(self, fn_name: str, fn_args: dict) -> dict:
         try:
+            if fn_name == "run_command" and self._sandbox is not None:
+                return self._sandbox.run(**fn_args)
             return TOOL_MAP[fn_name](**fn_args)
         except Exception as e:
             self.logger.error(
@@ -1148,21 +922,16 @@ No repitas lo que se hizo, solo señala problemas si los hay."""
         def _make_system_prompt() -> str:
             project_context = load_project_context(self.work_dir)
             memories_text = self.memdb.format_for_prompt()
-            override = self._read_system_prompt_override()
-            if override:
-                try:
-                    return override.format(
-                        work_dir=self.work_dir,
-                        project_context=project_context,
-                        memories=memories_text,
-                    )
-                except Exception as e:
-                    self.logger.error(
-                        "Falló el formateo del prompt externo",
-                        extra={"error_details": str(e)}
-                    )
-                    return override
-            return build_system_prompt(self.work_dir, project_context, memories_text)
+            return render_shared_prompt(
+                template_name="hybrid_system_prompt.txt",
+                work_dir=self.work_dir,
+                logger=self.logger,
+                fallback_builder=lambda: build_system_prompt(self.work_dir, project_context, memories_text),
+                system_prompt_path=self.system_prompt_path,
+                desktop=str(Path.home() / "Desktop"),
+                project_context=project_context,
+                memories=memories_text,
+            )
 
         system_prompt = _make_system_prompt()
         self.messages = [{"role": "system", "content": system_prompt}]
@@ -1260,17 +1029,43 @@ No repitas lo que se hizo, solo señala problemas si los hay."""
                                 if fn_name in ("edit_file", "write_file") and "error" not in result:
                                     if p := result.get("path"): changed_files.append(p)
 
-                                # Self-healing: si run_command falla, inyectar contexto de error
-                                if fn_name == "run_command" and result.get("returncode", 0) != 0 and "error" not in result:
+                                # ── Self-healing ──────────────────────────────────────────
+                                # Covers run_command failures and edit_file "not found" errors.
+                                # Injects a structured hint into the tool result so the LLM
+                                # can diagnose and retry with a different approach.
+                                _should_heal = False
+                                _heal_detail = ""
+
+                                if fn_name == "run_command" and "error" not in result and result.get("returncode", 0) != 0:
+                                    _should_heal = True
+                                    stdout = result.get("stdout", "")
+                                    stderr = result.get("stderr", "")
+                                    _heal_detail = (
+                                        f"El comando falló (rc={result['returncode']}).\n"
+                                        f"stdout: {stdout[:400]}\nstderr: {stderr[:400]}\n"
+                                        f"Analiza el error y corrígelo con un enfoque diferente. "
+                                        f"No repitas el mismo comando."
+                                    )
+                                elif fn_name == "edit_file" and "error" in result:
+                                    _should_heal = True
+                                    _heal_detail = (
+                                        f"edit_file no encontró el texto a reemplazar en "
+                                        f"'{fn_args.get('path', '?')}'.\n"
+                                        f"ACCIÓN REQUERIDA: usa read_file('{fn_args.get('path', '?')}') "
+                                        f"para obtener el contenido actual y copia old_text exactamente "
+                                        f"como aparece (incluyendo espacios e indentación)."
+                                    )
+
+                                if _should_heal:
                                     heal_count += 1
                                     if heal_count <= 3:
-                                        stderr = result.get("stderr", ""); stdout = result.get("stdout", "")
-                                        heal_msg = (f"[AUTO-HEAL #{heal_count}] El comando falló (rc={result['returncode']}).\n"
-                                                    f"stdout: {stdout[:500]}\nstderr: {stderr[:500]}\n"
-                                                    f"Analiza el error y corrígelo con un enfoque diferente.")
-                                        console.print(f"[{C_ERR}]  ↺ Auto-heal #{heal_count}/3[/]")
-                                        self.logger.warning("Self-healing activado", extra={"error_details": stderr[:200]})
+                                        heal_msg = f"[AUTO-HEAL #{heal_count}/3] {_heal_detail}"
                                         result["_heal_hint"] = heal_msg
+                                        console.print(f"[{C_ERR}]  ↺ Auto-heal #{heal_count}/3 [{fn_name}][/]")
+                                        self.logger.warning(
+                                            "Self-healing activado",
+                                            extra={"error_details": _heal_detail[:300]},
+                                        )
                         else:
                             result = {"error": f"Tool desconocida: {fn_name}"}
                             print_tool_result(result)
@@ -1357,6 +1152,10 @@ if __name__ == "__main__":
     parser.add_argument("--critic",       action="store_true",             help="Activar modo Actor-Crítico")
     parser.add_argument("--system-prompt", default=None,
                         help="Ruta de archivo para usar como prompt de sistema")
+    parser.add_argument("--sandbox", default=None, choices=["docker"],
+                        help="Modo de sandbox para run_command: 'docker' usa un contenedor efímero")
+    parser.add_argument("--sandbox-image", default="python:3.12-slim",
+                        help="Imagen Docker para el sandbox (default: python:3.12-slim)")
     args = parser.parse_args()
 
     model = args.model if args.model else select_model_menu(args.local_url)
@@ -1374,5 +1173,7 @@ if __name__ == "__main__":
         local_url=args.local_url, groq_model=selected_groq_model,
         backend=selected_backend, critic=args.critic,
         system_prompt_path=args.system_prompt,
+        sandbox=args.sandbox,
+        sandbox_image=args.sandbox_image,
     ).run()
 

@@ -21,6 +21,32 @@ except ImportError:
     WEB_AVAILABLE = False
 
 
+# ── Output sanitization ───────────────────────────────────────────────────────
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[mGKHFJABCDEF]|\x1b\][^\x07]*\x07")
+
+
+def _sanitize_output(text: str, max_chars: int = 20_000) -> str:
+    """Strip ANSI escape sequences and truncate long output with head+tail context.
+
+    Prevents the agent from processing garbage escape codes or running out of
+    context window on huge outputs (e.g. test suites, build logs).
+    """
+    if not text:
+        return text
+    text = _ANSI_ESCAPE_RE.sub("", text)
+    if len(text) <= max_chars:
+        return text
+    # Smart truncation: keep 2/3 head + 1/3 tail so both start and end are visible
+    head = max_chars * 2 // 3
+    tail = max_chars - head
+    skipped = len(text) - max_chars
+    return (
+        text[:head]
+        + f"\n\n[... {skipped:,} caracteres omitidos ...]\n\n"
+        + text[-tail:]
+    )
+
+
 class ToolRuntime:
     def __init__(self, work_dir: str = ".", root_dir: Optional[str] = None, os_name: Optional[str] = None):
         self.os_name = os_name or platform.system()
@@ -48,8 +74,8 @@ class ToolRuntime:
                 cwd=self.work_dir,
             )
             return {
-                "stdout": result.stdout.strip(),
-                "stderr": result.stderr.strip(),
+                "stdout": _sanitize_output(result.stdout.strip(), 20_000),
+                "stderr": _sanitize_output(result.stderr.strip(), 5_000),
                 "returncode": result.returncode,
             }
         except subprocess.TimeoutExpired:
@@ -84,6 +110,29 @@ class ToolRuntime:
         except Exception as exc:
             return {"error": str(exc)}
 
+    # ── edit_file ─────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _rstrip_lines(text: str) -> str:
+        """Strip trailing whitespace from every line (preserves line count)."""
+        return "\n".join(line.rstrip() for line in text.splitlines())
+
+    @staticmethod
+    def _best_fuzzy_match(content: str, old_text: str) -> tuple[float, int]:
+        """Return (best_ratio, best_line_start) for the closest contiguous block."""
+        old_lines = old_text.splitlines()
+        content_lines = content.splitlines()
+        n = len(old_lines)
+        best_ratio = 0.0
+        best_start = 0
+        for i in range(max(1, len(content_lines) - n + 1)):
+            window = "\n".join(content_lines[i : i + n])
+            ratio = difflib.SequenceMatcher(None, old_text, window, autojunk=False).ratio()
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_start = i
+        return best_ratio, best_start
+
     def edit_file(
         self,
         path: str,
@@ -92,12 +141,23 @@ class ToolRuntime:
         replace_all: bool = False,
         use_regex: bool = False,
     ) -> dict:
+        """Edit a file by replacing ``old_text`` with ``new_text``.
+
+        Match strategy (in order):
+        1. Exact match.
+        2. Trailing-whitespace-normalised match (rstrip each line).
+        3. Fail with a diagnostic: shows the most similar block so the LLM can
+           copy the exact text.
+
+        Returns a unified-diff summary on success.
+        """
         try:
             resolved = self.resolve(path)
             if not resolved.exists():
                 return {"error": f"Archivo no encontrado: {path}"}
             content = resolved.read_text(encoding="utf-8", errors="replace")
 
+            # ── regex branch (unchanged) ───────────────────────────────────────
             if use_regex:
                 try:
                     pattern = re.compile(old_text, re.MULTILINE)
@@ -106,13 +166,58 @@ class ToolRuntime:
                 if not pattern.search(content):
                     return {"error": "Patron regex no encontrado en el archivo."}
                 count = len(pattern.findall(content))
-                new_content = pattern.sub(new_text, content) if replace_all else pattern.sub(new_text, content, count=1)
-            else:
-                if old_text not in content:
-                    return {"error": "Texto no encontrado. Debe ser exacto (incluyendo espacios e indentacion)."}
-                count = content.count(old_text)
-                new_content = content.replace(old_text, new_text) if replace_all else content.replace(old_text, new_text, 1)
+                new_content = (
+                    pattern.sub(new_text, content)
+                    if replace_all
+                    else pattern.sub(new_text, content, count=1)
+                )
+                applied_fuzzy = False
 
+            # ── literal branch ────────────────────────────────────────────────
+            else:
+                applied_fuzzy = False
+
+                if old_text in content:
+                    # Fast path: exact match
+                    target_content = content
+                    target_old = old_text
+                else:
+                    # Try whitespace-normalised match (rstrip each line)
+                    norm_content = self._rstrip_lines(content)
+                    norm_old = self._rstrip_lines(old_text)
+
+                    if norm_old in norm_content:
+                        applied_fuzzy = True
+                        target_content = content
+                        target_old = old_text.rstrip()
+                    else:
+                        # Neither exact nor normalised — build a helpful error
+                        best_ratio, best_start = self._best_fuzzy_match(content, old_text)
+                        hint = ""
+                        if best_ratio > 0.5:
+                            content_lines = content.splitlines()
+                            n = len(old_text.splitlines())
+                            snippet = "\n".join(content_lines[best_start : best_start + n])
+                            hint = (
+                                f"\n\nBloque más parecido (similitud {best_ratio:.0%}, "
+                                f"línea ~{best_start + 1}):\n{snippet[:400]}"
+                            )
+                        return {
+                            "error": (
+                                "Texto no encontrado (ni exacto ni con normalización de espacios). "
+                                "Solución: usa read_file() para obtener el contenido actual y "
+                                f"copia old_text exactamente como aparece en el archivo.{hint}"
+                            )
+                        }
+
+                count = target_content.count(target_old)
+                new_content = (
+                    target_content.replace(target_old, new_text)
+                    if replace_all
+                    else target_content.replace(target_old, new_text, 1)
+                )
+
+            # ── diff generation ───────────────────────────────────────────────
             old_lines = content.splitlines(keepends=True)
             new_lines = new_content.splitlines(keepends=True)
             raw_diff = list(difflib.unified_diff(old_lines, new_lines, n=2))
@@ -120,13 +225,13 @@ class ToolRuntime:
             diff_entries: list[tuple[int, str, str]] = []
             lines_added = 0
             lines_removed = 0
-            old_ln = 0
-            new_ln = 0
+            old_ln = new_ln = 0
+
             for line in raw_diff:
                 if line.startswith("@@"):
-                    match = re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
-                    if match:
-                        old_ln, new_ln = int(match.group(1)), int(match.group(2))
+                    m = re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
+                    if m:
+                        old_ln, new_ln = int(m.group(1)), int(m.group(2))
                 elif line.startswith(("---", "+++")):
                     continue
                 elif line.startswith("-"):
@@ -143,7 +248,8 @@ class ToolRuntime:
                     new_ln += 1
 
             resolved.write_text(new_content, encoding="utf-8")
-            return {
+
+            result: dict = {
                 "success": True,
                 "path": str(resolved),
                 "replaced": count if replace_all else 1,
@@ -151,8 +257,17 @@ class ToolRuntime:
                 "removed": lines_removed,
                 "diff": diff_entries[:30],
             }
+            if applied_fuzzy:
+                result["warning"] = (
+                    "Coincidencia por normalización: se eliminaron espacios "
+                    "al final de línea en el archivo."
+                )
+            return result
+
         except Exception as exc:
             return {"error": str(exc)}
+
+    # ── rest of tools (unchanged) ─────────────────────────────────────────────
 
     def find_files(self, pattern: str, path: str = ".") -> dict:
         try:
@@ -352,7 +467,11 @@ _BASE_TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "edit_file",
-            "description": "Edita texto en un archivo existente. Soporta reemplazo multiple y regex.",
+            "description": (
+                "Edita texto en un archivo existente. Soporta reemplazo multiple y regex. "
+                "Si old_text no se encuentra exactamente, intenta normalización de espacios "
+                "y muestra el bloque más similar para ayudar a corregir."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
