@@ -1,7 +1,8 @@
 """Tests for the prompt rendering system (Jinja2-based)."""
+import shutil
 import sys
-import tempfile
 import unittest
+import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,15 +13,24 @@ import agent_prompting
 
 
 class PromptingTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp_root = ROOT / ".tmp-tests"
+        self._tmp_root.mkdir(exist_ok=True)
+        self._tmp = self._tmp_root / f"prompting-{uuid.uuid4().hex}"
+        self._tmp.mkdir()
+
+    def tearDown(self):
+        shutil.rmtree(self._tmp, ignore_errors=True)
+        shutil.rmtree(self._tmp_root, ignore_errors=True)
+
     def test_load_project_context_prefers_known_files(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "README.md").write_text("hola mundo", encoding="utf-8")
+        root = self._tmp
+        (root / "README.md").write_text("hola mundo", encoding="utf-8")
 
-            context = agent_prompting.load_project_context(str(root))
+        context = agent_prompting.load_project_context(str(root))
 
-            self.assertIn("Contexto del proyecto (README.md)", context)
-            self.assertIn("hola mundo", context)
+        self.assertIn("Contexto del proyecto (README.md)", context)
+        self.assertIn("hola mundo", context)
 
     def test_render_prompt_template_injects_shared_values(self):
         rendered = agent_prompting.render_prompt_template(
@@ -62,19 +72,18 @@ class PromptingTests(unittest.TestCase):
             def error(self, *args, **kwargs):
                 raise AssertionError(f"No esperaba error: {args!r} {kwargs!r}")
 
-        with tempfile.TemporaryDirectory() as tmp:
-            override = Path(tmp) / "custom_prompt.txt"
-            override.write_text("dir={{ work_dir }} | ctx={{ project_context }}", encoding="utf-8")
+        override = self._tmp / "custom_prompt.txt"
+        override.write_text("dir={{ work_dir }} | ctx={{ project_context }}", encoding="utf-8")
 
-            rendered = agent_prompting.build_system_prompt(
-                template_name="local_system_prompt.txt",
-                work_dir="/repo",
-                logger=Logger(),
-                fallback_builder=lambda: "fallback",
-                system_prompt_path=override,
-                project_context="README",
-            )
-            self.assertEqual(rendered, "dir=/repo | ctx=README")
+        rendered = agent_prompting.build_system_prompt(
+            template_name="local_system_prompt.txt",
+            work_dir="/repo",
+            logger=Logger(),
+            fallback_builder=lambda: "fallback",
+            system_prompt_path=override,
+            project_context="README",
+        )
+        self.assertEqual(rendered, "dir=/repo | ctx=README")
 
     def test_build_system_prompt_uses_legacy_override_template(self):
         """Override files using $variable (string.Template) still work."""
@@ -82,19 +91,18 @@ class PromptingTests(unittest.TestCase):
             def error(self, *args, **kwargs):
                 raise AssertionError(f"No esperaba error: {args!r} {kwargs!r}")
 
-        with tempfile.TemporaryDirectory() as tmp:
-            override = Path(tmp) / "custom_prompt.txt"
-            override.write_text("dir=$work_dir | ctx=$project_context", encoding="utf-8")
+        override = self._tmp / "custom_prompt.txt"
+        override.write_text("dir=$work_dir | ctx=$project_context", encoding="utf-8")
 
-            rendered = agent_prompting.build_system_prompt(
-                template_name="local_system_prompt.txt",
-                work_dir="/repo",
-                logger=Logger(),
-                fallback_builder=lambda: "fallback",
-                system_prompt_path=override,
-                project_context="README",
-            )
-            self.assertEqual(rendered, "dir=/repo | ctx=README")
+        rendered = agent_prompting.build_system_prompt(
+            template_name="local_system_prompt.txt",
+            work_dir="/repo",
+            logger=Logger(),
+            fallback_builder=lambda: "fallback",
+            system_prompt_path=override,
+            project_context="README",
+        )
+        self.assertEqual(rendered, "dir=/repo | ctx=README")
 
 
 if __name__ == "__main__":

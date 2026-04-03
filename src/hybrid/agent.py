@@ -492,7 +492,7 @@ class Agent:
         ) if groq_key else None
 
         self.router = SmartRouter(force=None if backend == "auto" else backend)
-        self.logger = _make_logger(f"mega.{id(self)}", Path(self.work_dir) / "agent_session.jsonl")
+        self.logger = _make_logger(f"hybrid.{id(self)}", Path(self.work_dir) / "agent_session.jsonl")
 
         # Memoria persistente SQLite + FTS5
         _mem = MemoryDB(_SCRIPT_DIR / "memory.db")

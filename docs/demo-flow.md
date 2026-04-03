@@ -1,23 +1,23 @@
 # Demo Flow
 
-## Flujo 1: prompt -> accion -> diff -> resultado
+## Flujo 1: refactoring asistido
 
 Prompt:
 
-```text
-Extrae la capa de herramientas a modulos compartidos y deja agent.py centrado en orquestacion/UI.
+```
+Extrae la capa de herramientas a módulos compartidos y deja agent.py centrado en orquestación/UI.
 ```
 
-Acciones esperadas:
+Acciones esperadas del agente:
 
-1. Leer `src/agent.py` y la variante hibrida.
+1. Leer `src/agent.py` y la variante híbrida.
 2. Crear `common_tools.py` y `common_tool_schemas.py`.
-3. Rewire de `TOOL_MAP` y `TOOLS`.
+3. Actualizar `TOOL_MAP` y `TOOLS` en ambas variantes.
 4. Ejecutar tests.
 
 Diff esperado:
 
-```text
+```
 + common_tools.py
 + common_tool_schemas.py
 ~ src/agent.py
@@ -27,31 +27,29 @@ Diff esperado:
 
 Resultado esperado:
 
-```text
+```
 7 tests OK
 tool runtime compartido
 variantes local e hybrid unificadas
 ```
 
-## Flujo 2: review de seguridad
+## Flujo 2: revisión de seguridad
 
 Prompt:
 
-```text
-Explica que bloquea run_command y que pasa si el modelo intenta salir del work_dir.
+```
+Explica qué bloquea run_command y qué pasa si el modelo intenta salir del work_dir.
 ```
 
 Resultado esperado:
 
-- referencia a `common_runtime.BLOCKED_COMMAND_PATTERNS`
-- explicacion de `resolve_in_root()`
-- aclaracion de que no hay sandbox de SO
+- Referencia a `common_runtime.BLOCKED_COMMAND_PATTERNS` con los patrones concretos.
+- Explicación de `resolve_in_root()` y cómo trata symlinks.
+- Aclaración explícita de que no hay sandbox de SO.
 
 ## Captura actual
 
-UI actual: [docs/screenshot.png](/C:/Users/dapio/Documents/ollama/docs/screenshot.png)
+UI actual: [docs/screenshot.png](screenshot.png)
 
-Nota:
-
-- Este repo todavia no incluye un GIF/video nuevo grabado desde una sesion reproducible.
-- Se ha dejado el flujo demo documentado para poder capturarlo sin ambiguedad.
+> El repositorio no incluye aún un GIF/video grabado desde una sesión reproducible.
+> El flujo está documentado para poder capturarlo sin ambigüedad cuando haya un entorno estable.

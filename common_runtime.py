@@ -4,14 +4,17 @@ Este módulo contiene la política mínima que aplican ambos agentes antes de
 delegar en `subprocess` o tocar el sistema de archivos.
 """
 
+import os
 import platform
 import re
+import shutil
 from pathlib import Path
 
 
 BLOCKED_COMMAND_PATTERNS = [
-    r'(^|\s)(rm|rmdir|del|erase)\s',
-    r'(^|\s)rd\s',
+    # Borrado de archivos/directorios — \b captura también "rm " y 'rm ' (no solo tras espacio)
+    r'\b(rm|rmdir|del|erase)\s',
+    r'\brd\s',
     r'remove-item\b',
     r'format\b',
     r'reg\s+(delete|add)\b',
@@ -23,8 +26,12 @@ BLOCKED_COMMAND_PATTERNS = [
     r'chmod\s+777\b',
     r'\bcmd\s*/c\s+.*\b(del|erase|rd|rmdir|format|shutdown)\b',
     r'\bpowershell(\.exe)?\b.*\b(remove-item|del|rm|rmdir)\b',
+    # Descarga + ejecución inline vía pipe
     r'curl\b.*\|',
+    r'wget\b.*\|',
     r'invoke-webrequest\b.*\|',
+    # git clean destruye archivos no rastreados del workspace
+    r'\bgit\s+clean\b',
 ]
 
 
@@ -59,10 +66,19 @@ def build_shell_command(shell: str, command: str, os_name: str | None = None) ->
     """Normaliza el shell solicitado a la forma concreta que usa subprocess."""
     active_os = os_name or platform.system()
     effective_shell = shell if shell != "auto" else ("powershell" if active_os == "Windows" else "bash")
+    if active_os == "Windows":
+        comspec = os.getenv("COMSPEC") or shutil.which("cmd") or r"C:\Windows\System32\cmd.exe"
+        powershell = (
+            shutil.which("powershell")
+            or str(Path(os.getenv("SystemRoot", r"C:\Windows")) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe")
+        )
+    else:
+        comspec = "cmd"
+        powershell = "powershell"
     if effective_shell == "powershell":
-        return ["powershell", "-NoProfile", "-Command", command], effective_shell
+        return [powershell, "-NoProfile", "-Command", command], effective_shell
     if effective_shell == "bash":
         return ["bash", "-c", command], effective_shell
     if effective_shell == "sh":
         return ["sh", "-c", command], effective_shell
-    return ["cmd", "/c", command], effective_shell
+    return [comspec, "/c", command], effective_shell

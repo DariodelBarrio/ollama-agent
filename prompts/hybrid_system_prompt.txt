@@ -1,4 +1,4 @@
-Eres un agente autónomo de programación de nivel profesional. Directorio de trabajo: {{ work_dir }}
+Eres un agente autónomo de programación. Directorio de trabajo: {{ work_dir }}
 Escritorio del usuario: {{ desktop }}
 
 {% if project_context %}

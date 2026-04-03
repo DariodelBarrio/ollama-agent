@@ -1,48 +1,92 @@
 # Ollama Agent
 
-Agente de codigo para backends OpenAI-compatible con dos variantes del mismo producto:
+Agente de código para backends OpenAI-compatible. Dos variantes del mismo núcleo:
 
-- `src/agent.py`: local-first, simple y rapido.
-- `src/hybrid/agent.py`: local + cloud, critic mode, router y memoria.
-
-La ruta canonica del producto hibrido ahora es `src/hybrid`. `IA/MEGA` queda solo como shim legado de transicion.
-Los prompts base viven en `prompts/` y se renderizan en tiempo de ejecucion.
+- **Local** (`src/agent.py`): sin dependencias de nube, rápido, autocontenido.
+- **Hybrid** (`src/hybrid/agent.py`): local + Groq, critic mode, router inteligente y memoria persistente.
 
 ![Tests](https://github.com/DariodelBarrio/ollama-agent/actions/workflows/tests.yml/badge.svg) ![Python](https://img.shields.io/badge/Python-3.9+-blue) ![OpenAI API](https://img.shields.io/badge/OpenAI--compatible-API-green) ![License](https://img.shields.io/badge/license-MIT-blue)
 
-## Comparacion frontal
+> **Estado:** v0.1.0 — experimental. La API y la UX pueden cambiar sin aviso.
 
-| Producto | Local | Offline | Tool calling | Multi-backend | Critic mode | AST scan | Safety sandbox | UI | Coste |
-|---|---|---:|---:|---:|---:|---:|---|---|---|
-| Ollama Agent | Si | Si en modo local | Si | Si | Si en `src/hybrid` | Si en `src/hybrid` | Parcial: blocklist + root guard | TUI | Bajo / 0 si usas Ollama |
-| Aider | Si | Parcial | No nativo tipo function calling | Si | No | No | Parcial | CLI | API o local |
-| OpenCode | Si | Depende del backend | Si | Si | No nativo | No | Parcial | CLI/TUI | Variable |
-| Claude Code | No local real | No | Si | No | No publico | No publico | Fuerte, gestionada por proveedor | TUI | API/suscripcion |
-| Codex CLI | No local real | No | Si | No | No publico | No publico | Fuerte, gestionada por proveedor | CLI | API |
+## Inicio rápido
 
-`Safety sandbox` aqui significa lo que el producto expone por defecto al agente, no una comparativa formal de seguridad entre vendors.
+**Requisitos previos:** [Ollama](https://ollama.com) instalado y corriendo, Python 3.9+.
+
+```bash
+git clone https://github.com/DariodelBarrio/ollama-agent.git
+cd ollama-agent
+python scripts/install.py
+ollama pull qwen2.5-coder:14b
+python src/agent.py --model qwen2.5-coder:14b --dir /ruta/al/proyecto
+```
+
+Para la variante híbrida (requiere `GROQ_API_KEY` si usas enrutamiento a Groq):
+
+```bash
+python scripts/install.py --hybrid
+
+# Linux/macOS
+export GROQ_API_KEY=gsk_...
+chmod +x src/hybrid/unix/*.sh
+
+# Windows
+set GROQ_API_KEY=gsk_...
+
+python src/hybrid/agent.py --model qwen2.5-coder:14b --dir /ruta/al/proyecto --backend auto
+```
 
 ## Variantes
 
+| Característica | Local | Hybrid |
+|---|---|---|
+| Backend | OpenAI-compatible (Ollama u otro) | Local + Groq (enrutamiento automático) |
+| Modos | `code`, `architect`, `research` | idem + critic |
+| Critic mode | No | Sí — segunda pasada con modelo local |
+| AST scan | No | Sí — esqueleto Python/JS/TS |
+| Memoria persistente | No | Sí — SQLite + FTS5 entre sesiones |
+| Slash commands | `/help /clear /mode` | `/help /clear /switch /cost /critic /ast /plan /memory /compact` |
+| Groq API key | No requerida | Solo si backend=auto o backend=groq |
+| Dependencias extra | Ninguna | `requirements-hybrid.txt` |
+
+## Instalación
+
+```bash
+python scripts/install.py           # variante local
+python scripts/install.py --hybrid  # variante hybrid
+```
+
+Archivos de dependencias:
+
+- `requirements.txt` — dependencias base (local agent)
+- `requirements-hybrid.txt` — base + sglang, vllm
+
+## Uso
+
 ### Local
 
-`python src/agent.py`
-
-- Backend OpenAI-compatible local o remoto.
-- Modos `code`, `architect`, `research`.
-- Tool calling para archivos, shell, web y navegacion de proyecto.
+```bash
+python src/agent.py \
+  --model qwen2.5-coder:14b \
+  --dir /ruta/al/proyecto \
+  [--ctx 8192] \
+  [--temp 0.05] \
+  [--api-base http://localhost:11434/v1]
+```
 
 ### Hybrid
 
-`python src/hybrid/agent.py`
+```bash
+python src/hybrid/agent.py \
+  --model qwen2.5-coder:14b \
+  --dir /ruta/al/proyecto \
+  --backend auto \
+  [--critic]
+```
 
-- Router entre backend local y Groq.
-- Critic mode con segunda pasada local.
-- AST scan del proyecto.
-- Memoria persistente SQLite.
-- Slash commands de sesion.
+Launchers preconfigurados disponibles en `src/hybrid/windows/` (`.bat`) y `src/hybrid/unix/` (`.sh`).
 
-## Architecture
+## Arquitectura
 
 ```mermaid
 flowchart TD
@@ -53,205 +97,99 @@ flowchart TD
     T --> R[common_runtime.py]
     R --> FS[Filesystem dentro del workspace]
     R --> SH[Shell local o sandbox Docker]
-    T --> WEB[Busqueda web y fetch URL]
+    T --> WEB[Búsqueda web y fetch URL]
     CLI --> LLM[Backend OpenAI-compatible]
-    CLI --> H[Router y memoria en src/hybrid/agent.py]
+    CLI --> H[Router y memoria — solo hybrid]
     H --> GROQ[Groq]
     H --> MEM[SQLite FTS5]
 ```
 
-El flujo básico es: el usuario lanza una tarea, el agente construye el prompt, el modelo decide si necesita tools, `common_tools.py` ejecuta acciones dentro del workspace y el agente devuelve resultado o sigue iterando hasta cerrar la tarea.
+El usuario lanza una tarea → el agente construye el prompt → el modelo decide qué tools usar → `common_tools.py` ejecuta las acciones dentro del workspace → el agente itera hasta cerrar la tarea.
 
-## Instalacion
-
-```bash
-git clone https://github.com/DariodelBarrio/ollama-agent.git
-cd ollama-agent
-python scripts/install.py
-python scripts/install.py --hybrid
-```
-
-Archivos de dependencias:
-
-- `requirements.txt`
-- `requirements-hybrid.txt`
-- `requirements-mega.txt` es alias legado de compatibilidad
-
-## Demo rapida en 60 segundos
-
-```bash
-git clone https://github.com/DariodelBarrio/ollama-agent.git
-cd ollama-agent
-python src/agent.py --model qwen2.5-coder:14b --dir .
-```
-
-Si quieres la variante hibrida:
-
-```bash
-python src/hybrid/agent.py --model qwen2.5-coder:14b --dir . --backend auto --critic
-```
-
-## Uso rapido
-
-```bash
-python src/agent.py --model qwen2.5-coder:14b --dir "C:\mi\proyecto"
-python src/hybrid/agent.py --model qwen2.5-coder:14b --dir "C:\mi\proyecto" --backend auto --critic
-```
-
-Launchers Windows limpios:
-
-- `src/hybrid/windows/local-coder.bat`
-- `src/hybrid/windows/local-reasoner.bat`
-- `src/hybrid/windows/critic.bat`
-- `src/hybrid/windows/groq-cloud.bat`
-- `src/hybrid/windows/install-deps.bat`
-
-Launchers Unix equivalentes:
-
-- `src/hybrid/unix/local-coder.sh`
-- `src/hybrid/unix/local-reasoner.sh`
-- `src/hybrid/unix/critic.sh`
-- `src/hybrid/unix/groq-cloud.sh`
-- `src/hybrid/unix/install-deps.sh`
-
-## Ejemplos reales
-
-### 1. Corregir un import roto
-
-Input:
-
-```text
-Arregla el import roto en src/agent.py y verifica qué archivo lo define.
-```
-
-Tools:
-
-```text
-grep("build_system_prompt", path=".")
-read_file("src/agent.py")
-edit_file("src/agent.py", ...)
-```
-
-Resultado:
-
-```text
-El agente localiza la definición real, corrige el import y devuelve un diff resumido.
-```
-
-### 2. Revisar seguridad del runtime
-
-Input:
-
-```text
-Revisa si run_command bloquea comandos destructivos y dime dónde está la política.
-```
-
-Tools:
-
-```text
-read_file("common_runtime.py")
-grep("BLOCKED_COMMAND_PATTERNS", path=".")
-read_file("tests/test_agent_safety.py")
-```
-
-Resultado:
-
-```text
-El agente identifica la blocklist, comprueba los tests de seguridad y resume qué queda cubierto y qué no.
-```
-
-### 3. Documentar una parte del sistema
-
-Input:
-
-```text
-Explícame cómo decide el backend en el modo híbrido.
-```
-
-Tools:
-
-```text
-read_file("src/hybrid/agent.py")
-grep("class SmartRouter", path="src/hybrid", extension=".py")
-```
-
-Resultado:
-
-```text
-El agente resume la heurística del router, cuándo fuerza Groq y cómo usa el umbral de contexto.
-```
-
-## Demos
-
-- Flujo paso a paso: [docs/demo-flow.md](docs/demo-flow.md)
-- Captura actual de la UI: [docs/screenshot.png](docs/screenshot.png)
-
-El repo ya documenta el flujo `prompt -> accion -> diff -> resultado`. No he añadido un GIF nuevo al repo porque no habia una grabacion reproducible en esta maquina.
-
-## Benchmark
-
-- Benchmark y metodologia: [docs/benchmark.md](docs/benchmark.md)
-
-El benchmark esta definido sobre 3 tareas y con formato reproducible. No se han inventado numeros donde no habia herramientas instaladas o ejecucion reproducible.
+Los módulos compartidos (`common_runtime.py`, `common_tools.py`, `common_tool_schemas.py`, `agent_prompting.py`) están en la raíz y los consumen ambas variantes. `src/base_agent.py` centraliza UI, logger y wrappers de tools.
 
 ## Seguridad
 
-Resumen:
+El agente aplica guardas de aplicación, **no un sandbox de sistema operativo**:
 
-- Las operaciones de fichero pasan por `resolve_in_root()`.
-- Las rutas se resuelven con `Path.resolve()`, asi que los symlinks que escapan del root quedan bloqueados.
-- Las rutas absolutas solo se permiten si, una vez resueltas, siguen dentro de `ROOT_DIR`.
-- `change_directory()` no puede sacar al agente fuera del root del workspace.
-- `run_command()` filtra una blocklist de comandos destructivos y pipelines peligrosos.
-- Esto no es un sandbox de SO ni un contenedor. Es una capa de guardas de aplicacion.
+- Las operaciones de fichero pasan por `resolve_in_root()`, que bloquea accesos fuera del workspace.
+- Los symlinks se resuelven antes de evaluar el path, evitando escapes vía enlace simbólico.
+- `run_command()` filtra una blocklist de comandos destructivos (`common_runtime.BLOCKED_COMMAND_PATTERNS`).
+- `change_directory()` no puede sacar al agente fuera del `ROOT_DIR`.
+
+Lo que **no** hace: no limita CPU/RAM/red, no inspecciona semántica completa del shell, no reemplaza un contenedor o VM.
+
+Para trabajo con código sensible: usa un repo desechable, un usuario de pocos privilegios, o el sandbox Docker opcional (`src/sandbox.py`).
 
 Detalle completo: [docs/security.md](docs/security.md)
 
-## Limitaciones actuales
+## Estado del proyecto
 
-- La sandbox es de aplicacion, no de sistema operativo. No sustituye un contenedor o una VM.
-- La proteccion de shell usa blocklist; reduce riesgo, pero no demuestra seguridad completa.
-- El benchmark frente a Aider/OpenCode esta definido, pero aun no incluye resultados cerrados y reproducibles para todas las herramientas.
-- La demo visual esta documentada, pero el repo todavia no incluye un GIF/video corto definitivo.
-- La variante `IA/MEGA` sigue existiendo como compatibilidad de transicion; la ruta canonica ya es `src/hybrid`.
-- El producto sigue en fase temprana y la release inicial debe leerse como `v0.1.0`, no como API o UX estable.
-- En Linux/macOS puede que necesites `chmod +x src/hybrid/unix/*.sh` antes del primer uso.
+- Versión `v0.1.0` — experimental, sin API pública estable.
+- El benchmark frente a Aider/OpenCode está definido pero los resultados están pendientes ([docs/benchmark.md](docs/benchmark.md)).
+- `IA/MEGA/` existe como shim de compatibilidad; la ruta canónica es `src/hybrid/`.
 
-## Estructura
+## Limitaciones
 
-```text
-ollama-agent/
-├── src/
-│   ├── agent.py
-│   └── hybrid/
-│       ├── __init__.py
-│       ├── agent.py
-│       └── windows/
-│           ├── local-coder.bat
-│           ├── local-reasoner.bat
-│           ├── critic.bat
-│           ├── groq-cloud.bat
-│           └── install-deps.bat
-├── common_runtime.py
-├── common_tool_schemas.py
-├── common_tools.py
-├── docs/
-├── prompts/
-└── tests/
+- **Sandbox de aplicación, no de OS.** La blocklist reduce riesgo pero no garantiza aislamiento completo.
+- **Sin resultados de benchmark publicados.** Metodología definida; no se han publicado números no reproducibles.
+- **API inestable.** La estructura de clases y argumentos puede cambiar entre versiones.
+- **Groq requerida para routing externo.** Sin `GROQ_API_KEY`, el hybrid usa solo el backend local.
+- **Memoria local.** La base SQLite es por máquina; no se sincroniza entre entornos.
+
+## Ejemplos
+
+### Corregir un import roto
+
+```
+Arregla el import roto en src/agent.py y verifica qué archivo lo define.
 ```
 
-## Branding
+El agente busca con `grep`, lee el archivo, edita solo la línea necesaria y resume el cambio.
 
-Regla actual:
+### Revisar cobertura de seguridad
 
-- `Ollama Agent` es el nombre del producto.
-- `Local` y `Hybrid` son variantes.
-- Se eliminan nombres de marketing mezclados como `MEGA`, `SONNET`, `OPUS` o `GEMINI` de la ruta principal y de los launchers canonicos.
+```
+Revisa si run_command bloquea comandos destructivos y dónde está la política.
+```
+
+El agente lee `common_runtime.py`, localiza `BLOCKED_COMMAND_PATTERNS`, revisa los tests y resume qué cubre y qué no.
+
+### Entender el router híbrido
+
+```
+Explícame cómo decide el backend en el modo híbrido.
+```
+
+El agente lee `SmartRouter` en `src/hybrid/agent.py` y resume la heurística: umbral de contexto, patrones de tarea, forzado manual.
 
 ## Tests
 
 ```bash
-py -3 -m unittest discover -s tests -p "test_*.py"
+python -m unittest discover -s tests -p "test_*.py"
+```
+
+CI corre en Python 3.11 y 3.12 sobre Windows. Ver [`.github/workflows/tests.yml`](.github/workflows/tests.yml).
+
+## Estructura
+
+```
+ollama-agent/
+├── src/
+│   ├── agent.py              # variante local
+│   ├── base_agent.py         # UI, logger y wrappers compartidos
+│   ├── sandbox.py            # sandbox Docker opcional
+│   └── hybrid/
+│       ├── agent.py          # variante hybrid
+│       ├── windows/          # launchers .bat
+│       └── unix/             # launchers .sh
+├── common_runtime.py         # seguridad: blocklist, resolve_in_root
+├── common_tools.py           # tool runtime: ficheros, shell, web
+├── common_tool_schemas.py    # validación Pydantic de argumentos de tools
+├── agent_prompting.py        # carga y renderizado de prompts Jinja2
+├── prompts/                  # templates del sistema
+├── docs/                     # seguridad, benchmark, demo
+└── tests/
 ```
 
 ## Licencia

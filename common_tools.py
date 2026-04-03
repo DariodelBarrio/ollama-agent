@@ -117,9 +117,20 @@ class ToolRuntime:
         except Exception as exc:
             return {"error": str(exc)}
 
+    # Límite simétrico con read_file (2 MB lectura) — previene escrituras accidentales enormes
+    _MAX_WRITE_BYTES = 10 * 1024 * 1024  # 10 MB
+
     def write_file(self, path: str, content: str) -> dict:
         """Escribe un archivo completo creando directorios intermedios si faltan."""
         try:
+            encoded = content.encode("utf-8")
+            if len(encoded) > self._MAX_WRITE_BYTES:
+                return {
+                    "error": (
+                        f"Contenido demasiado grande ({len(encoded):,} bytes). "
+                        f"Límite: {self._MAX_WRITE_BYTES // 1_000_000} MB."
+                    )
+                }
             resolved = self.resolve(path)
             resolved.parent.mkdir(parents=True, exist_ok=True)
             resolved.write_text(content, encoding="utf-8")
@@ -359,6 +370,9 @@ class ToolRuntime:
             resolved = self.resolve(path)
             if not resolved.exists():
                 return {"error": f"No existe: {path}"}
+            # Impide borrar el workspace raíz completo de una sola llamada.
+            if str(resolved) == self.root_dir:
+                return {"error": "No se puede eliminar el directorio raíz del workspace."}
             if resolved.is_dir():
                 shutil.rmtree(resolved)
             else:

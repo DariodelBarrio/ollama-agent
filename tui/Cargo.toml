@@ -1,0 +1,20 @@
+[package]
+name    = "ollama-agent-tui"
+version = "0.1.0"
+edition = "2021"
+description = "Terminal launcher for ollama-agent (local and hybrid variants)"
+
+[[bin]]
+name = "oat"          # ollama-agent tui
+path = "src/main.rs"
+
+[dependencies]
+# ratatui re-exports crossterm, so version alignment is guaranteed.
+ratatui = "0.29"
+serde   = { version = "1", features = ["derive"] }
+toml    = "0.8"
+dirs    = "5"
+
+[profile.release]
+strip   = true
+opt-level = "z"   # optimize for binary size — it's a launcher, not a compute task

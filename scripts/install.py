@@ -41,6 +41,8 @@ def main() -> int:
     if args.file:
         requirements_file = args.file.resolve()
     elif args.hybrid or args.mega:
+        if args.mega:
+            print("[DEPRECATED] --mega es un alias legado; usa --hybrid en su lugar.")
         requirements_file = REPO_ROOT / "requirements-hybrid.txt"
     else:
         requirements_file = REPO_ROOT / "requirements.txt"

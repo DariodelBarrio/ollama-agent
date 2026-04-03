@@ -38,6 +38,16 @@ docs/*.pdf
 *.gguf
 *.ggml
 
+# Artefactos externos no relacionados
+package/
+*.tgz
+
+# Benchmark: fixtures y resultados generados localmente
+benchmark_run/
+
+# TUI (Rust): artefactos de compilación
+tui/target/
+
 # MEGA runtime
 IA/MEGA/.history
 IA/MEGA/agent_session.jsonl
