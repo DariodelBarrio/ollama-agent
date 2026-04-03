@@ -45,16 +45,26 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let backend = CrosstermBackend::new(io::stdout());
     let mut term = Terminal::new(backend)?;
     let mut app = App::new(repo_root);
+    let mut dirty = true;
 
     loop {
-        app.poll_session();
-        app.poll_models();
-        term.draw(|f| ui::render(&app, f))?;
+        if app.poll_session() {
+            dirty = true;
+        }
+        if app.poll_models() {
+            dirty = true;
+        }
 
-        if event::poll(Duration::from_millis(50))? {
+        if dirty {
+            term.draw(|f| ui::render(&app, f))?;
+            dirty = false;
+        }
+
+        if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
                     app.handle_key(key.code, key.modifiers);
+                    dirty = true;
                 }
             }
         }

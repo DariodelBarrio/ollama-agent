@@ -214,12 +214,14 @@ impl App {
         }
     }
 
-    pub fn poll_session(&mut self) {
+    pub fn poll_session(&mut self) -> bool {
+        let mut changed = false;
         let mut finished_lines: Option<Vec<String>> = None;
         let mut status_update: Option<(String, bool)> = None;
 
         if let Some(session) = self.session.as_mut() {
             if let Some(exit) = session.drain_events() {
+                changed = true;
                 match exit {
                     Ok(status) if status.success() => {
                         session.lines.push_back("[launcher] Proceso finalizado correctamente.".into());
@@ -241,14 +243,19 @@ impl App {
         if let Some(lines) = finished_lines {
             self.last_session_lines = lines;
             self.session = None;
+            changed = true;
         }
         if let Some((msg, is_err)) = status_update {
             self.set_status(msg, is_err);
+            changed = true;
         }
+        changed
     }
 
-    pub fn poll_models(&mut self) {
+    pub fn poll_models(&mut self) -> bool {
+        let mut changed = false;
         while let Some(event) = self.model_task.as_ref().and_then(|task| task.try_recv()) {
+            changed = true;
             match event {
                 ModelEvent::Status(msg) => {
                     self.push_model_log(msg.clone());
@@ -296,6 +303,7 @@ impl App {
                 }
             }
         }
+        changed
     }
 
     pub fn stop_session(&mut self) {
