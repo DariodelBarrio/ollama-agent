@@ -8,5 +8,7 @@ if "%GROQ_API_KEY%"=="" (
     pause
     exit /b 1
 )
-python "%~dp0..\agent.py" --model qwen2.5-coder:14b --groq-model llama-3.3-70b-versatile --dir "%CD%" --tag GROQ --ctx 32768 --backend groq
+call "%~dp0find-python.bat" || goto :end
+%OLLAMA_AGENT_PYTHON% "%~dp0..\agent.py" --model qwen2.5-coder:14b --groq-model llama-3.3-70b-versatile --dir "%CD%" --tag GROQ --ctx 32768 --backend groq
+:end
 pause

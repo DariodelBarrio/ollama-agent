@@ -6,5 +6,7 @@ set CUDA_VISIBLE_DEVICES=0
 set OLLAMA_KV_CACHE_TYPE=q8_0
 title Ollama Agent - Hybrid Local Coder
 cls
-python "%~dp0..\agent.py" --model qwen2.5-coder:14b --dir "%CD%" --tag LOCAL --ctx 8192 --backend auto
+call "%~dp0find-python.bat" || goto :end
+%OLLAMA_AGENT_PYTHON% "%~dp0..\agent.py" --model qwen2.5-coder:14b --dir "%CD%" --tag LOCAL --ctx 8192 --backend auto
+:end
 pause
