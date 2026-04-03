@@ -1,3 +1,3 @@
 -r requirements-hybrid.txt
 
-# Alias legado. Usa requirements-hybrid.txt como nombre canonico.
+# Alias legado. `requirements-hybrid.txt` es el nombre canónico para Hybrid.

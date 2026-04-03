@@ -1,4 +1,4 @@
-name: Tests
+name: CI
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
   pull_request:
 
 jobs:
-  unittest:
+  unit-tests:
     runs-on: windows-latest
 
     strategy:
@@ -26,11 +26,59 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install dependencies
+      - name: Upgrade pip
         run: python -m pip install --upgrade pip
 
       - name: Install project requirements
         run: python -m pip install -r requirements.txt
 
-      - name: Run test suite
+      - name: Run unit test suite
         run: python -m unittest discover -s tests -p "test_*.py"
+
+  tui:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build TUI
+        working-directory: tui
+        run: cargo build --verbose
+
+      - name: Run TUI tests
+        working-directory: tui
+        run: cargo test --verbose
+
+  smoke:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+
+      - name: Install project requirements
+        run: python -m pip install -r requirements.txt
+
+      - name: Compile Python sources
+        run: python -m compileall common_runtime.py common_tools.py common_tool_schemas.py agent_prompting.py src scripts tests
+
+      - name: Local CLI help smoke test
+        run: python src/agent.py --help
+
+      - name: Hybrid CLI help smoke test
+        run: python src/hybrid/agent.py --help
+
+      - name: Benchmark helper smoke test
+        run: python scripts/run_benchmark.py setup

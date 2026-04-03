@@ -1,5 +1,5 @@
 """
-Agente de programacion local con Ollama - UI estilo Claude Code
+Agente local de Ollama Agent.
 Uso: python src/agent.py [--model qwen3:14b] [--dir C:\\mi\\proyecto] [--ctx 16384] [--temp 0.15]
 """
 import json
@@ -639,14 +639,14 @@ def run_agent(model: str, work_dir: str, tag: str, num_ctx: int, temperature: fl
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Agente local con Ollama/vLLM/LMDeploy/LM Studio")
+    parser = argparse.ArgumentParser(description="Agente Local sobre backend OpenAI-compatible")
     parser.add_argument("--model",    default=None,  help="Modelo (omitir para menú interactivo)")
-    parser.add_argument("--dir",      default=".")
-    parser.add_argument("--tag",      default="AGENTE")
-    parser.add_argument("--ctx",      type=int,   default=16384)
-    parser.add_argument("--temp",     type=float, default=0.15)
-    parser.add_argument("--api-base", default="http://localhost:11434/v1")
-    parser.add_argument("--system-prompt", default=None)
+    parser.add_argument("--dir",      default=".", help="Directorio de trabajo")
+    parser.add_argument("--tag",      default="AGENTE", help="Etiqueta visible en el header")
+    parser.add_argument("--ctx",      type=int,   default=16384, help="Ventana de contexto o presupuesto de tokens del backend")
+    parser.add_argument("--temp",     type=float, default=0.15, help="Temperatura 0.0-1.0")
+    parser.add_argument("--api-base", default="http://localhost:11434/v1", help="URL OpenAI-compatible del backend local")
+    parser.add_argument("--system-prompt", default=None, help="Ruta opcional a un prompt de sistema custom")
     args = parser.parse_args()
     model = args.model if args.model else select_model_menu(args.api_base)
     run_agent(model, args.dir, args.tag, args.ctx, args.temp, args.api_base, args.system_prompt)

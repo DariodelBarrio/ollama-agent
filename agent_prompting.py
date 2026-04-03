@@ -1,9 +1,4 @@
-"""Helpers para construir prompts del agente y cargar contexto del proyecto.
-
-El objetivo de este módulo es desacoplar el renderizado del prompt de los
-agentes concretos. Así ambos backends comparten la misma lógica de plantillas
-y el mismo fallback cuando falta Jinja2 o cuando una plantilla falla.
-"""
+"""Helpers compartidos para prompting y filtrado de razonamiento interno."""
 
 from __future__ import annotations
 
@@ -21,6 +16,72 @@ except ImportError:
 REPO_ROOT = Path(__file__).resolve().parent
 PROMPTS_DIR = REPO_ROOT / "prompts"
 DEFAULT_CONTEXT_FILES = ("CLAUDE.md", "README.md", ".cursorrules")
+
+
+class HiddenReasoningFilter:
+    """Strip hidden reasoning blocks without depending on model cooperation.
+
+    The filter removes `<think>...</think>` and `<thought>...</thought>` blocks
+    from streamed text. If the model never emits these tags, the content passes
+    through unchanged.
+    """
+
+    _START_TAGS = {
+        "<think>": "</think>",
+        "<thought>": "</thought>",
+    }
+    _MAX_TAG_LEN = max(len(tag) for pair in (
+        list(_START_TAGS.keys()) + list(_START_TAGS.values())
+    ) for tag in [pair])
+
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._hidden_end_tag: str | None = None
+
+    def feed(self, text: str) -> str:
+        self._buffer += text
+        return self._drain(final=False)
+
+    def finish(self) -> str:
+        return self._drain(final=True)
+
+    def _drain(self, final: bool) -> str:
+        visible: list[str] = []
+        while self._buffer:
+            if self._hidden_end_tag:
+                end_idx = self._buffer.find(self._hidden_end_tag)
+                if end_idx == -1:
+                    if final:
+                        self._buffer = ""
+                        self._hidden_end_tag = None
+                    break
+                self._buffer = self._buffer[end_idx + len(self._hidden_end_tag):]
+                self._hidden_end_tag = None
+                continue
+
+            matches = [
+                (idx, start_tag, end_tag)
+                for start_tag, end_tag in self._START_TAGS.items()
+                for idx in [self._buffer.find(start_tag)]
+                if idx != -1
+            ]
+            if not matches:
+                if final:
+                    visible.append(self._buffer)
+                    self._buffer = ""
+                else:
+                    cut = max(0, len(self._buffer) - self._MAX_TAG_LEN)
+                    if cut:
+                        visible.append(self._buffer[:cut])
+                        self._buffer = self._buffer[cut:]
+                break
+
+            start_idx, start_tag, end_tag = min(matches, key=lambda item: item[0])
+            if start_idx:
+                visible.append(self._buffer[:start_idx])
+            self._buffer = self._buffer[start_idx + len(start_tag):]
+            self._hidden_end_tag = end_tag
+        return "".join(visible)
 
 
 def load_project_context(work_dir: str, max_chars: int = 16_000) -> str:
@@ -41,6 +102,13 @@ def load_project_context(work_dir: str, max_chars: int = 16_000) -> str:
             continue
         return f"Contexto del proyecto ({name}):\n{content}\n"
     return ""
+
+
+def build_mode_section(mode: str, summary: str) -> str:
+    """Return a short mode section for the local agent prompt."""
+    if not mode or not summary:
+        return ""
+    return f"Modo actual: {mode.upper()}\nPrioridad: {summary}\n"
 
 
 def _jinja_env(loader=None) -> "Environment":

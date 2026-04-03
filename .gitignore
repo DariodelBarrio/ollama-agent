@@ -1,5 +1,6 @@
 # Python
 __pycache__/
+.pytest_cache/
 *.py[cod]
 *$py.class
 *.egg-info/
@@ -44,6 +45,7 @@ package/
 
 # Benchmark: fixtures y resultados generados localmente
 benchmark_run/
+.tmp-tests/
 
 # TUI (Rust): artefactos de compilación
 tui/target/

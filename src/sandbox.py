@@ -23,6 +23,8 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
+from common_runtime import is_safe_command
+
 
 DOCKER_AVAILABLE: bool = bool(shutil.which("docker"))
 
@@ -75,6 +77,20 @@ class DockerSandbox:
         Returns the same ``{stdout, stderr, returncode}`` dict as
         ``ToolRuntime.run_command``, plus a ``_sandbox: "docker"`` marker.
         """
+        ok, reason = is_safe_command(command)
+        if not ok:
+            return {"error": reason, "_sandbox": "docker"}
+
+        effective_shell = shell if shell != "auto" else "bash"
+        if effective_shell not in {"bash", "sh"}:
+            return {
+                "error": (
+                    f"Shell no soportado en sandbox Docker: {shell}. "
+                    "Usa 'bash', 'sh' o 'auto'."
+                ),
+                "_sandbox": "docker",
+            }
+
         docker_cmd = [
             "docker", "run",
             "--rm",
@@ -95,7 +111,7 @@ class DockerSandbox:
             "--tmpfs", "/tmp:size=64m",
         ]
 
-        docker_cmd += [self.image, shell, "-c", command]
+        docker_cmd += [self.image, effective_shell, "-c", command]
 
         try:
             result = subprocess.run(

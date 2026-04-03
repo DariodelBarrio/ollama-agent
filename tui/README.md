@@ -1,12 +1,70 @@
-# ollama-agent TUI (`oat`)
+# TUI Launcher (`oat`)
 
-Launcher de terminal para los agentes local e hybrid. Reemplaza los
-launchers `.bat` / `.sh` con un configurador interactivo con perfiles guardados.
+`oat` is the terminal-first launcher and session manager for Ollama Agent.
+It does not replace the Python agents. It wraps the existing entry points and
+keeps the runtime logic in Python.
 
-## Requisitos
+Canonical agent entry points:
 
-- [Rust](https://rustup.rs/) 1.75+
-- El agente Python debe estar instalado y funcionando (ver README principal)
+- [`../src/agent.py`](../src/agent.py)
+- [`../src/hybrid/agent.py`](../src/hybrid/agent.py)
+
+## What Phase 1 Includes
+
+The current TUI is intentionally small but useful:
+
+- choose `Local` or `Hybrid`
+- edit the main launch parameters
+- list local models
+- download local models
+- delete local models
+- save and load reusable profiles
+- launch the Python agent as a managed child process
+- watch live stdout/stderr in the TUI
+- send line-based input to the running agent
+- stop the child process from the launcher
+
+This keeps the project terminal-first without making `.bat` files the primary
+interface anymore.
+
+## Architecture
+
+The TUI has three layers:
+
+1. profile state and persistence in `src/config.rs`
+2. command derivation and child-process control in `src/agent.rs`
+3. local model management in `src/models.rs`
+4. terminal UI and navigation in `src/app.rs` + `src/ui.rs`
+
+The Python agents remain the execution core. `oat` only builds the command,
+spawns the process, forwards input, and renders output.
+
+## Supported Parameters
+
+Both variants expose:
+
+- model
+- work directory
+- tag
+- context window (`ctx`)
+- temperature
+- optional system prompt path
+
+Hybrid also exposes:
+
+- backend (`auto`, `local`, `groq`)
+- local endpoint
+- Groq model
+- critic mode
+- optional Docker sandbox settings
+
+Local model management uses the active local endpoint from the current profile:
+
+- `api_base` for `Local`
+- `local_url` for `Hybrid`
+
+The launcher strips a trailing `/v1` and then talks to Ollama's native
+management endpoints (`/api/tags`, `/api/pull`, `/api/delete`).
 
 ## Build
 
@@ -15,88 +73,94 @@ cd tui
 cargo build --release
 ```
 
-El binario queda en `tui/target/release/oat` (Linux/macOS) o `tui\target\release\oat.exe` (Windows).
+Binary output:
 
-Opcional — instalar en PATH:
+- Linux/macOS: `tui/target/release/oat`
+- Windows: `tui\target\release\oat.exe`
 
-```bash
-# Linux/macOS
-cargo install --path .
+## Usage
 
-# Windows (desde PowerShell)
-cargo install --path .     # instala en %USERPROFILE%\.cargo\bin\oat.exe
-```
-
-## Uso
+From the repository root:
 
 ```bash
-# Desde la raíz del repo
 ./tui/target/release/oat
-
-# O si está instalado en PATH
-oat
-
-# Desde fuera del repo
-OLLAMA_AGENT_ROOT=/ruta/al/repo oat     # Linux/macOS
-set OLLAMA_AGENT_ROOT=C:\ruta\repo && oat  # Windows
+oat.exe
 ```
 
-## Teclas
+From outside the repository:
 
-### Menú principal
+```bash
+OLLAMA_AGENT_ROOT=/path/to/repo oat
+set OLLAMA_AGENT_ROOT=C:\path\to\repo && oat.exe
+```
 
-| Tecla | Acción |
-|---|---|
-| `j` / `↓` | Bajar |
-| `k` / `↑` | Subir |
-| `Enter` | Seleccionar |
-| `q` | Salir |
+## Model Management
 
-### Configurar agente
+Open the model screen from:
 
-| Tecla | Acción |
-|---|---|
-| `Tab` / `↓` | Siguiente campo |
-| `Shift+Tab` / `↑` | Campo anterior |
-| `Enter` | Editar campo de texto |
-| `Esc` | Cancelar edición / volver al menú |
-| `Space` / `Enter` | Alternar bool o ciclar opción select |
-| `F5` | Lanzar agente con la configuración actual |
-| `F2` | Guardar perfil |
-| `Ctrl+S` | Guardar perfil (alternativa) |
+- main menu: `Local models`
+- configure screen: `F3`
 
-### Gestión de perfiles
+Current controls:
 
-| Tecla | Acción |
-|---|---|
-| `j` / `↓` | Bajar |
-| `k` / `↑` | Subir |
-| `Enter` | Cargar perfil seleccionado |
-| `d` | Eliminar perfil seleccionado |
-| `Esc` | Volver al menú |
+- `r`: refresh installed models
+- `Enter`: set selected installed model as the active profile model
+- `p`: type a model name to pull, then `Enter` to start download
+- `d`: delete the selected installed model
+- `Esc`: return to configuration
 
-## Perfiles
+Download progress is shown when the local backend streams status updates in the
+same format as Ollama.
 
-Los perfiles se guardan en:
+## Profiles
+
+Profiles are stored at:
 
 - Linux/macOS: `~/.config/ollama-agent/profiles.toml`
 - Windows: `%APPDATA%\ollama-agent\profiles.toml`
 
-Formato TOML editable a mano si es necesario.
+The TUI keeps old profiles readable by using defaults for fields that were
+added later.
 
-## Flujo de lanzamiento
+## Session Model
 
-1. `oat` arranca la TUI y muestra el menú principal.
-2. Seleccionas variante → editas parámetros → `F5`.
-3. La TUI suspende su pantalla y lanza el agente Python con los args configurados.
-4. El agente corre con su propia TUI (Rich/prompt_toolkit) de forma normal.
-5. Cuando el agente termina (`salir` o Ctrl+C), presionas Enter y la TUI se reanuda.
+`oat` launches the selected Python agent as a child process and keeps the user
+inside one terminal UI.
 
-La TUI actúa como configurador/launcher. No sustituye ni duplica la lógica del agente.
+Current session controls:
 
-## Variables de entorno
+- `F5`: launch
+- `F2`: save current profile
+- `i`: start editing a line of input for the running agent
+- `Enter`: send that line
+- `F6`: stop the child process
+- `Esc`: return from session view to configuration
 
-| Variable | Uso |
+## Practical Limits
+
+This is a first-phase TUI, not a full terminal multiplexer.
+
+- input forwarding is line-based
+- the integrated session does not try to preserve `prompt_toolkit` features
+- `Hybrid` runs in a simplified input mode when launched from `oat`
+- stopping a session kills the child process; it is not a graceful in-agent shutdown
+
+Those limits are deliberate for now: the TUI manages the current Python core
+without forking a second frontend stack.
+
+Model-management limits:
+
+- it is only available when the configured local backend exposes Ollama's
+  native model-management API
+- generic OpenAI-compatible backends may work for inference but not for model
+  listing, pull, or delete
+- the launcher reports that limitation directly instead of faking support
+
+## Environment Variables
+
+| Variable | Purpose |
 |---|---|
-| `OLLAMA_AGENT_ROOT` | Ruta al repo si `oat` se ejecuta desde fuera de él |
-| `GROQ_API_KEY` | Requerida para el modo hybrid con backend groq |
+| `OLLAMA_AGENT_ROOT` | Repository path when `oat` starts outside the repo |
+| `GROQ_API_KEY` | Required for Hybrid runs that route to Groq |
+| `PYTHONUNBUFFERED` | Set automatically by `oat` for live output |
+| `OLLAMA_AGENT_SIMPLE_INPUT` | Set automatically by `oat` for managed Hybrid sessions |

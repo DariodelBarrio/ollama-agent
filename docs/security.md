@@ -1,146 +1,144 @@
-# Seguridad
+# Security Model
 
-## Modelo real
+This project does not implement a full operating-system sandbox. Its safety
+story is based on application-level restrictions inside the agent runtime.
 
-Ollama Agent no usa un sandbox de sistema operativo propio. La seguridad es una
-combinación de guardas de aplicación:
+That distinction matters:
 
-- Restricción de rutas al `ROOT_DIR` del workspace.
-- Resolución canónica con `Path.resolve()` antes de cualquier operación de archivo.
-- Blocklist de patrones de comandos destructivos.
-- Límites de tamaño en lectura y escritura de archivos.
-- Guard explícito contra borrado del directorio raíz del workspace.
+- these guards reduce accidental damage
+- they do not make hostile code execution safe
+- they do not replace containers, VMs, or OS security boundaries
 
-Esto reduce riesgo operativo, pero **no equivale a un contenedor, una VM o una
-política MAC del sistema**.
+## What The Agent Restricts
 
----
+Current protections include:
 
-## Validación de rutas
+- workspace-root validation for file access
+- canonical path resolution before file operations
+- a shared blocklist for clearly destructive shell commands
+- limits on file read and write sizes
+- protection against deleting or moving the workspace root itself
 
-`resolve_in_root(path, work_dir, root_dir)` permite rutas absolutas y relativas
-solo si, tras resolverlas con `Path.resolve()`, siguen dentro de `root_dir`.
+The relevant runtime lives primarily in [`common_runtime.py`](../common_runtime.py).
 
-| Ruta | Resultado si root_dir = C:\repo |
+## Path Safety
+
+`resolve_in_root(path, work_dir, root_dir)` allows absolute or relative paths
+only if the resolved target remains inside `root_dir`.
+
+Examples:
+
+| Path | Result |
 |---|---|
-| `src/app.py` | Permitida |
-| `C:\repo\src\app.py` | Permitida (absoluta, dentro de root) |
-| `../../etc/passwd` | Bloqueada — ValueError |
-| `C:\Windows\system32\hosts` | Bloqueada — ValueError |
+| `src/app.py` | Allowed |
+| `/repo/src/app.py` | Allowed if `/repo` is the workspace root |
+| `../../etc/passwd` | Blocked |
+| `/etc/hosts` | Blocked |
 
-**Symlinks:** Se usa `Path.resolve()`, por lo que un symlink dentro del repo
-que apunte fuera queda bloqueado; uno que siga apuntando dentro del repo se permite.
+Because the runtime resolves symlinks before checking the final path, a symlink
+inside the repository that points outside the workspace is blocked as well.
 
-**Cambio de directorio:** `change_directory()` actualiza `WORK_DIR` pero mantiene
-`ROOT_DIR` como límite duro. El agente no puede salir del workspace raíz.
+`change_directory()` updates the working directory, but it does not allow the
+agent to escape the original root workspace.
 
----
+## Command Safety
 
-## Comandos bloqueados
+The command filter is implemented as a blocklist in
+`common_runtime.BLOCKED_COMMAND_PATTERNS`.
 
-La blocklist vive en `common_runtime.BLOCKED_COMMAND_PATTERNS` (17 patrones regex).
-Se aplica sobre el comando lowercased antes de ejecutar cualquier subprocess.
+It is intended to catch obvious destructive operations such as:
 
-| # | Patrón | Qué bloquea |
-|---|---|---|
-| 1 | `\b(rm\|rmdir\|del\|erase)\s` | Borrado de archivos/directorios |
-| 2 | `\brd\s` | `rd` (alias de rmdir en cmd) |
-| 3 | `remove-item\b` | PowerShell Remove-Item |
-| 4 | `format\b` | Formateo de volúmenes |
-| 5 | `reg\s+(delete\|add)\b` | Modificación del registro de Windows |
-| 6 | `shutdown\b` | Apagado del sistema |
-| 7 | `reboot\b` | Reinicio del sistema |
-| 8 | `poweroff\b` | Apagado forzado |
-| 9 | `mkfs\b` | Creación de sistema de archivos (Linux) |
-| 10 | `diskpart\b` | Particionado (Windows) |
-| 11 | `chmod\s+777\b` | Permisos excesivamente abiertos |
-| 12 | `cmd /c ... (del\|erase\|rd\|rmdir\|format\|shutdown)` | Borrado/formato vía cmd /c |
-| 13 | `powershell ... (remove-item\|del\|rm\|rmdir)` | Borrado vía pipeline PowerShell |
-| 14 | `curl\b.*\|` | Descarga + ejecución inline vía pipe |
-| 15 | `wget\b.*\|` | Descarga + ejecución inline vía pipe |
-| 16 | `invoke-webrequest\b.*\|` | Descarga + ejecución inline (PowerShell) |
-| 17 | `\bgit\s+clean\b` | Borrado de archivos no rastreados del workspace |
+- file and directory deletion
+- disk formatting and partitioning
+- raw writes to `/dev/*` with `dd`
+- Windows registry modification
+- shutdown and reboot commands
+- inline download-and-execute shell patterns
+- `git clean`
+- `git reset --hard`
+- `git checkout -- ...`
 
-**Nota sobre patrones 1-2:** Usan `\b` (word boundary) en lugar de `(^|\s)`.
-Esto captura variantes como `bash -c "rm -rf ."` donde `rm` va precedido de `"`,
-no de espacio.
+This is useful, but limited.
 
-**Limitación de la blocklist:**
+### Important Limits
 
-- Es una lista de exclusión. No prueba que un comando sea seguro.
-- Comandos que invocan código destructivo por indirección (p.ej. `python -c "import shutil; shutil.rmtree(...)"`) pueden no ser capturados.
-- Si necesitas aislamiento fuerte, usa el sandbox Docker opcional (`src/sandbox.py`) o ejecuta el agente en un contenedor/VM.
+- A blocklist does not prove a command is safe.
+- Indirect destructive behavior may still bypass the filter.
+- Safe-looking commands can still execute unsafe code from the repository.
 
----
+For example, a command like `python -c "import shutil; shutil.rmtree(...)"` may
+not match a deletion regex directly.
 
-## Operaciones de archivo
+## File Operation Limits
 
-### Límites de tamaño
+Current limits in the runtime include:
 
-| Operación | Límite |
+| Operation | Limit |
 |---|---|
-| `read_file` | 2 MB por archivo |
-| `write_file` | 10 MB por contenido |
-| `grep` | Archivos > 1 MB ignorados |
-| Contexto de proyecto | 16 KB (CLAUDE.md / README.md) |
+| `read_file` | 2 MB per file |
+| `write_file` | 10 MB per payload |
+| `grep` | skips files larger than 1 MB |
+| prompt context loading | limited project context files only |
 
-### Guard de borrado del workspace raíz
+The agent also rejects deletion of the workspace root directory itself.
 
-`delete_file` rechaza explícitamente el `root_dir` como destino:
+## Network Exposure
 
+If web tools are enabled, `fetch_url` can access any URL reachable from the
+machine running the agent, including local services such as `localhost`.
+
+That means:
+
+- the agent can read internal development endpoints
+- it can access local HTTP services if the model chooses to do so
+- this should be treated as controlled local SSRF risk
+
+If your environment exposes sensitive internal services, do not treat this
+agent as safely isolated.
+
+## Optional Docker Sandbox
+
+[`src/sandbox.py`](../src/sandbox.py) provides an optional Docker-based sandbox
+for `run_command`.
+
+The Docker mode uses:
+
+- ephemeral containers
+- read-only root filesystem
+- dropped Linux capabilities
+- `no-new-privileges`
+- no network by default
+- CPU and memory limits
+
+The Docker path still uses the same application-level command blocklist as the
+local runtime. The container adds isolation around command execution; it does
+not replace the runtime guardrails.
+
+Important limitations:
+
+- this only affects `run_command`
+- file operations such as `write_file`, `edit_file`, `move_file` and `delete_file`
+  still execute on the host workspace
+- the repository is mounted read-write inside the container, so sandboxed
+  commands can still modify workspace files
+
+Example:
+
+```bash
+python src/hybrid/agent.py --sandbox docker --sandbox-image python:3.12-slim
 ```
-delete_file("/ruta/al/workspace") → error: "No se puede eliminar el directorio raíz del workspace."
-```
 
-Subdirectorios dentro del workspace sí pueden borrarse.
+## Practical Guidance
 
----
+For untrusted code or sensitive repositories:
 
-## Fetch de URLs (`fetch_url`)
+1. work on a disposable clone
+2. use a low-privilege user account
+3. enable the Docker sandbox if command isolation helps
+4. use a container or VM when stronger isolation is required
 
-La herramienta `fetch_url` puede acceder a cualquier URL accesible desde la
-máquina donde corre el agente, incluyendo servicios locales (`localhost`, `127.0.0.1`).
+## Bottom Line
 
-Esto es SSRF de aplicación controlado:
-
-- No hay elevación de privilegios (el agente ya corre en la máquina local).
-- Puede exponer datos de servicios locales (Ollama API, bases de datos con interfaz HTTP, etc.) si el modelo lo solicita.
-- No se bloquea por defecto porque los usos legítimos (acceder a docs de un servidor de desarrollo, Swagger, etc.) son comunes.
-
-Si el agente tiene acceso a servicios internos sensibles, no le des acceso a `fetch_url` o ejecuta el agente en una red aislada.
-
----
-
-## Sandbox Docker (opcional)
-
-`src/sandbox.py` ofrece ejecución de comandos dentro de un contenedor efímero:
-
-- `--rm`: el contenedor se destruye tras cada comando.
-- `--read-only`: raíz del contenedor solo lectura; `/tmp` montado como tmpfs.
-- `--cap-drop=ALL`: sin capabilities Linux.
-- `--security-opt=no-new-privileges`: sin escalada de privilegios.
-- `--network=none`: sin red por defecto.
-- Límites de CPU (`--cpu-shares`) y memoria (`--memory`).
-
-El workspace del proyecto se monta como `rw` en `/workspace` — el agente puede
-escribir en él, pero no en el resto del sistema de archivos del host.
-
-**Limitaciones del sandbox Docker:**
-
-- Solo intercepta `run_command`. Las operaciones de archivo (`write_file`, `edit_file`, etc.) siguen ejecutándose en el host local.
-- Requiere Docker Desktop en Windows (WSL2 o Hyper-V para montaje de volúmenes).
-- No previene que el agente escriba archivos maliciosos en el workspace vía `write_file`.
-- No es un sandbox de OS completo; un root dentro del contenedor con volumen montado puede escribir al workspace del host.
-
-Uso: `python src/hybrid/agent.py --sandbox docker [--sandbox-image python:3.12-slim]`
-
----
-
-## Recomendación operativa
-
-Para trabajo con código sensible o no confiable:
-
-1. Usa un repo desechable o copia temporal del proyecto.
-2. Ejecuta el agente con un usuario de pocos privilegios.
-3. Activa el sandbox Docker (`--sandbox docker`) para mayor aislamiento de ejecución de comandos.
-4. Para aislamiento fuerte: usa contenedor, VM o una máquina dedicada.
+Ollama Agent is safer than an unrestricted shell wrapper, but it is not a
+hardened execution environment. Treat it as a developer tool with guardrails,
+not as a security boundary.

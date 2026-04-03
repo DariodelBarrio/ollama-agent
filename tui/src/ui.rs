@@ -1,38 +1,32 @@
-//! Ratatui rendering — pure functions, no state mutation.
+//! Ratatui rendering for the launcher.
 
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
 
-use crate::app::{App, FieldKind, Screen, MENU_HYBRID, MENU_LOCAL, MENU_PROFILES, MENU_QUIT};
+use crate::app::{
+    App, FieldKind, Screen, MENU_HYBRID, MENU_LOCAL, MENU_MODELS, MENU_PROFILES, MENU_QUIT,
+};
 use crate::config::Variant;
 
-// ── Palette ───────────────────────────────────────────────────────────────────
-
-const C_TITLE:  Color = Color::Rgb(91, 155, 213);
+const C_TITLE: Color = Color::Rgb(91, 155, 213);
 const C_BORDER: Color = Color::Rgb(55, 55, 55);
-const C_SELECT: Color = Color::Rgb(0, 120, 215);
-const C_LOCAL:  Color = Color::Rgb(80, 200, 120);
-const C_HYBRID: Color = Color::Rgb(180, 140, 240);
-const C_OK:     Color = Color::Green;
-const C_ERR:    Color = Color::Red;
-const C_DIM:    Color = Color::Rgb(90, 90, 90);
-const BG:       Color = Color::Rgb(18, 18, 18);
-
-// ── Entry point ───────────────────────────────────────────────────────────────
+const C_SELECT: Color = Color::Rgb(70, 130, 180);
+const C_LOCAL: Color = Color::Rgb(80, 200, 120);
+const C_HYBRID: Color = Color::Rgb(255, 174, 66);
+const C_WARN: Color = Color::Rgb(255, 210, 90);
+const C_OK: Color = Color::Green;
+const C_ERR: Color = Color::Red;
+const C_DIM: Color = Color::Rgb(110, 118, 129);
+const BG: Color = Color::Rgb(18, 18, 18);
 
 pub fn render(app: &App, frame: &mut Frame) {
     let area = frame.area();
-
-    // Dark background fill
-    frame.render_widget(
-        Block::default().style(Style::default().bg(BG)),
-        area,
-    );
+    frame.render_widget(Block::default().style(Style::default().bg(BG)), area);
 
     let [header, body, statusbar] = Layout::vertical([
         Constraint::Length(2),
@@ -45,42 +39,49 @@ pub fn render(app: &App, frame: &mut Frame) {
     render_statusbar(app, frame, statusbar);
 
     match app.screen {
-        Screen::MainMenu  => render_main_menu(app, frame, body),
+        Screen::MainMenu => render_main_menu(app, frame, body),
         Screen::Configure => render_configure(app, frame, body),
-        Screen::Profiles  => render_profiles(app, frame, body),
+        Screen::Models => render_models(app, frame, body),
+        Screen::Profiles => render_profiles(app, frame, body),
+        Screen::Session => render_session(app, frame, body),
     }
 }
 
-// ── Header ────────────────────────────────────────────────────────────────────
-
 fn render_header(app: &App, frame: &mut Frame, area: Rect) {
     let variant_span = match app.profile.variant {
-        Variant::Local  => Span::styled(" Local ",  Style::default().fg(C_LOCAL).add_modifier(Modifier::BOLD)),
+        Variant::Local => Span::styled(" Local ", Style::default().fg(C_LOCAL).add_modifier(Modifier::BOLD)),
         Variant::Hybrid => Span::styled(" Hybrid ", Style::default().fg(C_HYBRID).add_modifier(Modifier::BOLD)),
+    };
+    let screen = match app.screen {
+        Screen::MainMenu => "launcher",
+        Screen::Configure => "configure",
+        Screen::Models => "models",
+        Screen::Profiles => "profiles",
+        Screen::Session => "session",
     };
     let line = Line::from(vec![
         Span::styled("ollama-agent", Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD)),
         Span::styled(" tui  ", Style::default().fg(C_DIM)),
         variant_span,
-        Span::styled(format!("  {}", app.profile.model), Style::default().fg(C_DIM)),
+        Span::styled(format!("  {}  ", app.profile.model), Style::default().fg(C_DIM)),
+        Span::styled(screen, Style::default().fg(C_DIM)),
     ]);
     frame.render_widget(
-        Paragraph::new(line)
-            .block(Block::default().borders(Borders::BOTTOM).border_style(Style::default().fg(C_BORDER))),
+        Paragraph::new(line).block(Block::default().borders(Borders::BOTTOM).border_style(Style::default().fg(C_BORDER))),
         area,
     );
 }
-
-// ── Status bar ────────────────────────────────────────────────────────────────
 
 fn render_statusbar(app: &App, frame: &mut Frame, area: Rect) {
     let (text, color) = if let Some((msg, is_err)) = &app.status {
         (msg.as_str(), if *is_err { C_ERR } else { C_OK })
     } else {
         let hint = match app.screen {
-            Screen::MainMenu  => "j/k  navegar    Enter  seleccionar    q  salir",
-            Screen::Configure => "Tab  campo    Enter  editar    F5  lanzar    F2  guardar    Esc  volver",
-            Screen::Profiles  => "j/k  navegar    Enter  cargar    d  eliminar    Esc  volver",
+            Screen::MainMenu => "j/k navegar  Enter abrir  q salir",
+            Screen::Configure => "Tab campo  Enter editar  F3 modelos  F5 lanzar  F2 guardar  Esc volver",
+            Screen::Models => "j/k navegar  Enter usar  p pull  d borrar  r refrescar  Esc volver",
+            Screen::Profiles => "j/k navegar  Enter cargar  d borrar  Esc volver",
+            Screen::Session => "i entrada  Enter enviar  F6 detener  Esc volver  j/k scroll",
         };
         (hint, C_DIM)
     };
@@ -91,17 +92,16 @@ fn render_statusbar(app: &App, frame: &mut Frame, area: Rect) {
     );
 }
 
-// ── Main menu ─────────────────────────────────────────────────────────────────
-
 fn render_main_menu(app: &App, frame: &mut Frame, area: Rect) {
-    let popup = centered(44, 14, area);
+    let popup = centered(46, 16, area);
     frame.render_widget(Clear, popup);
 
     let items: &[(usize, &str, Color)] = &[
-        (MENU_LOCAL,    "  Launch Local Agent   ", C_LOCAL),
-        (MENU_HYBRID,   "  Launch Hybrid Agent  ", C_HYBRID),
-        (MENU_PROFILES, "  Manage Profiles      ", C_TITLE),
-        (MENU_QUIT,     "  Quit                 ", C_DIM),
+        (MENU_LOCAL, "  Local session      ", C_LOCAL),
+        (MENU_HYBRID, "  Hybrid session     ", C_HYBRID),
+        (MENU_MODELS, "  Local models       ", C_WARN),
+        (MENU_PROFILES, "  Profiles           ", C_TITLE),
+        (MENU_QUIT, "  Quit               ", C_DIM),
     ];
 
     let list_items: Vec<ListItem> = items
@@ -118,79 +118,47 @@ fn render_main_menu(app: &App, frame: &mut Frame, area: Rect) {
         .collect();
 
     let block = Block::default()
-        .title(Span::styled(
-            " Ollama Agent Launcher ",
-            Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD),
-        ))
+        .title(Span::styled(" Ollama Agent TUI ", Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD)))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(C_BORDER))
-        .style(Style::default().bg(BG));
+        .border_style(Style::default().fg(C_BORDER));
 
     frame.render_widget(List::new(list_items).block(block), popup);
 }
 
-// ── Configure ─────────────────────────────────────────────────────────────────
-
 fn render_configure(app: &App, frame: &mut Frame, area: Rect) {
-    let title = format!(" Configure: {} Agent ", app.profile.variant.label());
     let block = Block::default()
-        .title(Span::styled(title, Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(
+            format!(" Configure: {} ", app.profile.variant.label()),
+            Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD),
+        ))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(C_BORDER))
-        .style(Style::default().bg(BG));
+        .border_style(Style::default().fg(C_BORDER));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if app.fields.is_empty() {
-        return;
-    }
+    let [fields_area, preview_area] = Layout::vertical([Constraint::Min(0), Constraint::Length(7)])
+        .margin(1)
+        .areas(inner);
 
-    // Pad inside the block
-    let [fields_area, preview_area] = Layout::vertical([
-        Constraint::Min(0),
-        Constraint::Length(3),
-    ])
-    .margin(1)
-    .areas(inner);
-
-    // One row per field, with a blank row between them via Length(2)
-    let n         = app.fields.len();
-    let row_h     = 2u16;
-    let max_fit   = (fields_area.height / row_h) as usize;
-    let visible_n = n.min(max_fit);
-
-    // Scroll so the selected field is always visible
-    let start = if app.field_idx >= visible_n {
-        app.field_idx + 1 - visible_n
-    } else {
-        0
-    };
-    let end = (start + visible_n).min(n);
-
-    let constraints: Vec<Constraint> =
-        (start..end).map(|_| Constraint::Length(row_h)).collect();
+    let row_height = 2;
+    let visible = (fields_area.height / row_height).max(1) as usize;
+    let start = if app.field_idx >= visible { app.field_idx + 1 - visible } else { 0 };
+    let end = (start + visible).min(app.fields.len());
+    let constraints: Vec<Constraint> = (start..end).map(|_| Constraint::Length(row_height)).collect();
     let rows = Layout::vertical(constraints).split(fields_area);
 
     for (i, (field, row)) in app.fields[start..end].iter().zip(rows.iter()).enumerate() {
-        let abs_idx = start + i;
-        let focused = abs_idx == app.field_idx;
-
+        let idx = start + i;
+        let focused = idx == app.field_idx;
         let label_style = if focused {
             Style::default().fg(C_SELECT).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::White)
         };
-
-        // Value display with inline cursor when editing
-        let value_display: String = if field.editing {
-            format!("{}_", field.value)
-        } else {
-            field.value.clone()
-        };
-
+        let value = if field.editing { format!("{}_", field.value) } else { field.value.clone() };
         let value_style = if field.editing {
             Style::default().fg(Color::Black).bg(Color::White)
         } else if focused {
@@ -198,96 +166,236 @@ fn render_configure(app: &App, frame: &mut Frame, area: Rect) {
         } else {
             Style::default().fg(C_DIM)
         };
-
-        // Small type indicator
-        let indicator = match &field.kind {
-            FieldKind::Bool          => if field.value == "on" { "[x]" } else { "[ ]" },
-            FieldKind::Select(_)     => "[+]",
-            _ => "   ",
+        let kind = match &field.kind {
+            FieldKind::Bool => {
+                if field.value == "on" {
+                    "[x]"
+                } else {
+                    "[ ]"
+                }
+            }
+            FieldKind::Select(_) => "[+]",
+            FieldKind::Path => "[path]",
+            FieldKind::Integer => "[int]",
+            FieldKind::Float => "[float]",
+            FieldKind::Text => "",
         };
-
         let line = Line::from(vec![
-            Span::styled(format!("{:<22}", field.label), label_style),
-            Span::styled(&value_display, value_style),
-            Span::styled(format!(" {}", indicator), Style::default().fg(C_DIM)),
+            Span::styled(format!("{:<18}", field.label), label_style),
+            Span::styled(value, value_style),
+            Span::styled(format!(" {kind}"), Style::default().fg(C_DIM)),
         ]);
-
         frame.render_widget(Paragraph::new(line), *row);
     }
 
-    // Command preview strip
-    let preview_text = crate::agent::command_preview(&app.profile, &app.repo_root);
-    let preview = Paragraph::new(
-        Line::from(vec![
-            Span::styled("cmd: ", Style::default().fg(C_DIM)),
-            Span::styled(
-                // truncate so it fits in one line
-                if preview_text.len() > preview_area.width.saturating_sub(6) as usize {
-                    format!("{}...", &preview_text[..(preview_area.width.saturating_sub(9)) as usize])
-                } else {
-                    preview_text
-                },
-                Style::default().fg(Color::Rgb(60, 60, 60)),
-            ),
-        ])
-    )
-    .block(Block::default().borders(Borders::TOP).border_style(Style::default().fg(C_BORDER)));
-
+    let command = crate::agent::command_preview(&app.profile, &app.repo_root);
+    let detail = match app.profile.variant {
+        Variant::Local => format!("workdir: {}", app.resolve_work_dir()),
+        Variant::Hybrid => format!(
+            "backend: {}  critic: {}  sandbox: {}",
+            app.profile.backend,
+            if app.profile.critic { "on" } else { "off" },
+            if app.profile.sandbox.is_empty() { "off" } else { &app.profile.sandbox }
+        ),
+    };
+    let preview = Paragraph::new(format!("{detail}\ncmd: {command}"))
+        .wrap(Wrap { trim: false })
+        .block(Block::default().title(" Launch Preview ").borders(Borders::TOP).border_style(Style::default().fg(C_BORDER)));
     frame.render_widget(preview, preview_area);
 }
 
-// ── Profiles ──────────────────────────────────────────────────────────────────
+fn render_models(app: &App, frame: &mut Frame, area: Rect) {
+    let block = Block::default()
+        .title(Span::styled(" Local Models ", Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD)))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(C_BORDER));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let [meta_area, content_area, input_area] = Layout::vertical([
+        Constraint::Length(4),
+        Constraint::Min(8),
+        Constraint::Length(3),
+    ])
+    .margin(1)
+    .areas(inner);
+
+    let endpoint = match app.local_models_endpoint() {
+        Ok(endpoint) => endpoint,
+        Err(err) => err,
+    };
+    let meta = Paragraph::new(format!(
+        "endpoint: {endpoint}\nperfil: {} · modelo activo: {}\nnota: requiere backend local compatible con la API nativa de Ollama",
+        app.profile.name, app.profile.model
+    ))
+    .wrap(Wrap { trim: false })
+    .block(Block::default().title(" Backend ").borders(Borders::ALL).border_style(Style::default().fg(C_BORDER)));
+    frame.render_widget(meta, meta_area);
+
+    let [models_area, logs_area] = Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).areas(content_area);
+
+    let model_items: Vec<ListItem> = if app.models.is_empty() {
+        vec![ListItem::new(Span::styled("  (sin modelos listados)", Style::default().fg(C_DIM)))]
+    } else {
+        app.models
+            .iter()
+            .enumerate()
+            .map(|(idx, model)| {
+                let selected = idx == app.model_idx;
+                let size = model
+                    .size_bytes
+                    .map(human_bytes)
+                    .unwrap_or_else(|| "?".into());
+                let stamp = model.modified_at.as_deref().unwrap_or("sin fecha");
+                let style = if selected {
+                    Style::default().fg(BG).bg(C_SELECT).add_modifier(Modifier::BOLD)
+                } else if model.name == app.profile.model {
+                    Style::default().fg(C_LOCAL).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("{:<28}", model.name), style),
+                    Span::styled(format!(" {size} "), Style::default().fg(C_DIM)),
+                    Span::styled(stamp.to_string(), Style::default().fg(C_DIM)),
+                ]))
+            })
+            .collect()
+    };
+    let models_block = Block::default()
+        .title(" Installed ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(C_BORDER));
+    frame.render_widget(List::new(model_items).block(models_block), models_area);
+
+    let logs_text = if app.model_logs.is_empty() {
+        "Sin actividad todavia.".to_string()
+    } else {
+        app.model_logs.join("\n")
+    };
+    let logs_block = Block::default()
+        .title(if app.model_task_running { " Model Activity " } else { " Model Log " })
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(C_BORDER));
+    frame.render_widget(Paragraph::new(logs_text).wrap(Wrap { trim: false }).block(logs_block), logs_area);
+
+    let input_style = if app.model_input_editing {
+        Style::default().fg(Color::Black).bg(Color::White)
+    } else {
+        Style::default().fg(C_DIM)
+    };
+    let input_text = if app.model_input_editing {
+        format!("{}_", app.model_input_buffer)
+    } else if app.model_input_buffer.is_empty() {
+        "Pulsa p para descargar un modelo; Enter usa el seleccionado en el perfil.".into()
+    } else {
+        app.model_input_buffer.clone()
+    };
+    let input = Paragraph::new(Span::styled(input_text, input_style))
+        .block(Block::default().title(" Pull Model ").borders(Borders::ALL).border_style(Style::default().fg(C_BORDER)));
+    frame.render_widget(input, input_area);
+}
 
 fn render_profiles(app: &App, frame: &mut Frame, area: Rect) {
-    let popup = centered(70, 80, area);
+    let popup = centered(72, 80, area);
     frame.render_widget(Clear, popup);
 
     let items: Vec<ListItem> = if app.store.profiles.is_empty() {
-        vec![ListItem::new(Span::styled(
-            "  (sin perfiles guardados)",
-            Style::default().fg(C_DIM),
-        ))]
+        vec![ListItem::new(Span::styled("  (sin perfiles guardados)", Style::default().fg(C_DIM)))]
     } else {
         app.store
             .profiles
             .iter()
             .enumerate()
             .map(|(i, p)| {
-                let sel    = i == app.profile_idx;
-                let prefix = if sel { " > " } else { "   " };
-                let (vlabel, vcolor) = match p.variant {
-                    Variant::Local  => ("Local ", C_LOCAL),
-                    Variant::Hybrid => ("Hybrid", C_HYBRID),
-                };
-                let name_style = if sel {
+                let selected = i == app.profile_idx;
+                let style = if selected {
                     Style::default().fg(BG).bg(C_SELECT).add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::White)
                 };
+                let variant_color = if p.variant == Variant::Local { C_LOCAL } else { C_HYBRID };
                 ListItem::new(Line::from(vec![
-                    Span::styled(prefix, Style::default().fg(C_SELECT)),
-                    Span::styled(&p.name, name_style),
-                    Span::styled("  ", Style::default()),
-                    Span::styled(vlabel, Style::default().fg(vcolor)),
-                    Span::styled(format!("  {}", p.model), Style::default().fg(C_DIM)),
+                    Span::styled(format!("{:<16}", p.name), style),
+                    Span::styled(format!(" {} ", p.variant.label()), Style::default().fg(variant_color)),
+                    Span::styled(format!(" {}", p.model), Style::default().fg(C_DIM)),
                 ]))
             })
             .collect()
     };
 
     let block = Block::default()
-        .title(Span::styled(" Perfiles ", Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(" Profiles ", Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD)))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(C_BORDER))
-        .style(Style::default().bg(BG));
+        .border_style(Style::default().fg(C_BORDER));
 
     frame.render_widget(List::new(items).block(block), popup);
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+fn render_session(app: &App, frame: &mut Frame, area: Rect) {
+    let [meta_area, log_area, input_area] = Layout::vertical([
+        Constraint::Length(4),
+        Constraint::Min(4),
+        Constraint::Length(3),
+    ])
+    .areas(area);
 
-/// Returns a centered Rect with absolute width/height (in cells).
+    let session_title = if app.session.is_some() { " Session " } else { " Last Session " };
+    let meta = Paragraph::new(format!(
+        "{}\nworkdir: {}\nF6 stop · i input · Esc return to config",
+        crate::agent::command_preview(&app.profile, &app.repo_root),
+        app.resolve_work_dir(),
+    ))
+    .wrap(Wrap { trim: false })
+    .block(Block::default().title(session_title).borders(Borders::ALL).border_style(Style::default().fg(C_BORDER)));
+    frame.render_widget(meta, meta_area);
+
+    let lines = app.session_log_lines();
+    let joined = if lines.is_empty() {
+        "[launcher] No hay salida todavia.".to_string()
+    } else {
+        lines.join("\n")
+    };
+    let log = Paragraph::new(joined)
+        .wrap(Wrap { trim: false })
+        .scroll((app.session_scroll, 0))
+        .block(Block::default().title(" Live Output ").borders(Borders::ALL).border_style(Style::default().fg(C_BORDER)));
+    frame.render_widget(log, log_area);
+
+    let input_style = if app.input_editing {
+        Style::default().fg(Color::Black).bg(Color::White)
+    } else {
+        Style::default().fg(C_DIM)
+    };
+    let input_text = if app.input_editing {
+        format!("{}_", app.input_buffer)
+    } else if app.input_buffer.is_empty() {
+        "Pulsa i para escribir una linea y Enter para enviarla.".into()
+    } else {
+        app.input_buffer.clone()
+    };
+    let input = Paragraph::new(Span::styled(input_text, input_style))
+        .block(Block::default().title(" Input ").borders(Borders::ALL).border_style(Style::default().fg(C_BORDER)));
+    frame.render_widget(input, input_area);
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0usize;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{} {}", bytes, UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
 fn centered(w: u16, h: u16, area: Rect) -> Rect {
     let w = w.min(area.width);
     let h = h.min(area.height);

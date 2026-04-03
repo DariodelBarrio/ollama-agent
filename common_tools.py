@@ -397,6 +397,8 @@ class ToolRuntime:
             target = self.resolve(dst)
             if not source.exists():
                 return {"error": f"No existe: {src}"}
+            if str(source) == self.root_dir:
+                return {"error": "No se puede mover ni renombrar el directorio raíz del workspace."}
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(source), str(target))
             return {"success": True, "from": str(source), "to": str(target)}
@@ -465,7 +467,7 @@ _BASE_TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "run_command",
-            "description": "Ejecuta comandos en el shell del SO (auto-detecta powershell/bash).",
+            "description": "Ejecuta comandos en el shell del SO con filtro básico contra patrones claramente destructivos.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -595,7 +597,7 @@ _BASE_TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "move_file",
-            "description": "Mueve o renombra un archivo o carpeta.",
+            "description": "Mueve o renombra un archivo o carpeta dentro del workspace; no permite mover la raíz del workspace.",
             "parameters": {
                 "type": "object",
                 "properties": {

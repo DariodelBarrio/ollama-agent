@@ -1,23 +1,26 @@
 # Demo Flow
 
-## Flujo 1: refactoring asistido
+This document describes a reproducible demo workflow for the repository. It is
+meant to show the intended interaction pattern, not to market the project.
+
+## Flow 1: Shared tool runtime refactor
 
 Prompt:
 
+```text
+Extrae la capa de herramientas a modulos compartidos y deja agent.py centrado en orquestacion/UI.
 ```
-Extrae la capa de herramientas a módulos compartidos y deja agent.py centrado en orquestación/UI.
-```
 
-Acciones esperadas del agente:
+Expected behavior:
 
-1. Leer `src/agent.py` y la variante híbrida.
-2. Crear `common_tools.py` y `common_tool_schemas.py`.
-3. Actualizar `TOOL_MAP` y `TOOLS` en ambas variantes.
-4. Ejecutar tests.
+1. Read `src/agent.py` and `src/hybrid/agent.py`.
+2. Create shared tool modules.
+3. Update both agent variants to use the shared runtime.
+4. Run the test suite.
 
-Diff esperado:
+Expected diff shape:
 
-```
+```text
 + common_tools.py
 + common_tool_schemas.py
 ~ src/agent.py
@@ -25,31 +28,32 @@ Diff esperado:
 ~ tests/test_agent_safety.py
 ```
 
-Resultado esperado:
+Expected outcome:
 
-```
-7 tests OK
-tool runtime compartido
-variantes local e hybrid unificadas
+```text
+shared tool runtime
+local and hybrid variants aligned
+tests still passing
 ```
 
-## Flujo 2: revisión de seguridad
+## Flow 2: Security explanation
 
 Prompt:
 
+```text
+Explica que bloquea run_command y que pasa si el modelo intenta salir del work_dir.
 ```
-Explica qué bloquea run_command y qué pasa si el modelo intenta salir del work_dir.
-```
 
-Resultado esperado:
+Expected answer characteristics:
 
-- Referencia a `common_runtime.BLOCKED_COMMAND_PATTERNS` con los patrones concretos.
-- Explicación de `resolve_in_root()` y cómo trata symlinks.
-- Aclaración explícita de que no hay sandbox de SO.
+- references `common_runtime.BLOCKED_COMMAND_PATTERNS`
+- explains `resolve_in_root()`
+- states clearly that there is no OS-level sandbox
 
-## Captura actual
+## Screenshot
 
-UI actual: [docs/screenshot.png](screenshot.png)
+Current UI screenshot: [screenshot.png](screenshot.png)
 
-> El repositorio no incluye aún un GIF/video grabado desde una sesión reproducible.
-> El flujo está documentado para poder capturarlo sin ambigüedad cuando haya un entorno estable.
+The repository does not yet include a recorded video or GIF for a stable,
+reproducible session. This document is intentionally limited to the workflow
+that can be reproduced from the current codebase.

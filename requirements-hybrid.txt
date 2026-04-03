@@ -1,5 +1,5 @@
 -r requirements.txt
 
-# Extras especificos del agente hibrido
+# Extras específicos de la variante Hybrid
 sglang
 vllm

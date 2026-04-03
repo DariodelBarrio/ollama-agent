@@ -7,8 +7,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-// ── Types ─────────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Variant {
@@ -20,7 +18,7 @@ pub enum Variant {
 impl Variant {
     pub fn label(&self) -> &'static str {
         match self {
-            Variant::Local  => "Local",
+            Variant::Local => "Local",
             Variant::Hybrid => "Hybrid",
         }
     }
@@ -28,41 +26,57 @@ impl Variant {
 
 /// All parameters needed to launch an agent session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Profile {
-    pub name:       String,
-    pub variant:    Variant,
-    pub model:      String,
-    pub work_dir:   String,
-    pub ctx:        u32,
+    pub name: String,
+    pub variant: Variant,
+    pub model: String,
+    pub work_dir: String,
+    pub tag: String,
+    pub ctx: u32,
     pub temperature: f32,
+    pub system_prompt: String,
     // Local-specific
-    pub api_base:   String,
+    pub api_base: String,
     // Hybrid-specific
-    pub backend:    String,
-    pub critic:     bool,
+    pub backend: String,
+    pub critic: bool,
     pub groq_model: String,
-    pub local_url:  String,
+    pub local_url: String,
+    pub sandbox: String,
+    pub sandbox_image: String,
 }
 
 impl Default for Profile {
     fn default() -> Self {
         Self {
-            name:        "default".into(),
-            variant:     Variant::Local,
-            model:       "qwen2.5-coder:14b".into(),
-            work_dir:    ".".into(),
-            ctx:         16384,
+            name: "default".into(),
+            variant: Variant::Local,
+            model: "qwen2.5-coder:14b".into(),
+            work_dir: ".".into(),
+            tag: "AGENTE".into(),
+            ctx: 16384,
             temperature: 0.15,
-            api_base:    "http://localhost:11434/v1".into(),
-            backend:     "auto".into(),
-            critic:      false,
-            groq_model:  "llama-3.3-70b-versatile".into(),
-            local_url:   "http://localhost:11434/v1".into(),
+            system_prompt: String::new(),
+            api_base: "http://localhost:11434/v1".into(),
+            backend: "auto".into(),
+            critic: false,
+            groq_model: "llama-3.3-70b-versatile".into(),
+            local_url: "http://localhost:11434/v1".into(),
+            sandbox: String::new(),
+            sandbox_image: "python:3.12-slim".into(),
         }
     }
 }
 
-// ── Store ─────────────────────────────────────────────────────────────────────
+impl Profile {
+    pub fn local_management_base(&self) -> &str {
+        match self.variant {
+            Variant::Local => &self.api_base,
+            Variant::Hybrid => &self.local_url,
+        }
+    }
+}
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ProfileStore {
@@ -96,7 +110,7 @@ impl ProfileStore {
     pub fn upsert(&mut self, profile: Profile) {
         match self.profiles.iter().position(|p| p.name == profile.name) {
             Some(idx) => self.profiles[idx] = profile,
-            None      => self.profiles.push(profile),
+            None => self.profiles.push(profile),
         }
     }
 

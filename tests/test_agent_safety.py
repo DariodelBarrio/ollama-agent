@@ -13,6 +13,7 @@ import sys
 import unittest
 import uuid
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -32,6 +33,7 @@ def load_module(name: str, relative_path: str):
 
 
 hybrid_agent = load_module("hybrid_agent", "src/hybrid/agent.py")
+sandbox_module = load_module("sandbox_module", "src/sandbox.py")
 
 
 # ── Path safety ───────────────────────────────────────────────────────────────
@@ -77,6 +79,16 @@ class CommandSafetyTests(unittest.TestCase):
 
     def test_run_command_blocks_git_clean(self):
         result = base_agent.run_command("git clean -fdx", timeout=5)
+        self.assertIn("error", result)
+        self.assertIn("bloqueado", result["error"].lower())
+
+    def test_run_command_blocks_git_reset_hard(self):
+        result = base_agent.run_command("git reset --hard HEAD", timeout=5)
+        self.assertIn("error", result)
+        self.assertIn("bloqueado", result["error"].lower())
+
+    def test_run_command_blocks_dd_to_dev(self):
+        result = base_agent.run_command("dd if=image.bin of=/dev/sda bs=4M", timeout=5)
         self.assertIn("error", result)
         self.assertIn("bloqueado", result["error"].lower())
 
@@ -172,6 +184,24 @@ class HybridValidationTests(unittest.TestCase):
         self.assertIn("error", result)
 
 
+class DockerSandboxSafetyTests(unittest.TestCase):
+    def test_sandbox_blocks_dangerous_command_before_docker_run(self):
+        sandbox = sandbox_module.DockerSandbox.__new__(sandbox_module.DockerSandbox)
+        sandbox.work_dir = str(ROOT)
+        sandbox.image = "python:3.12-slim"
+        sandbox.mem_limit = "256m"
+        sandbox.cpu_shares = 512
+        sandbox.network = False
+
+        with mock.patch.object(sandbox_module.subprocess, "run") as run_mock:
+            result = sandbox.run("git reset --hard HEAD")
+
+        self.assertIn("error", result)
+        self.assertIn("bloqueado", result["error"].lower())
+        self.assertEqual(result.get("_sandbox"), "docker")
+        run_mock.assert_not_called()
+
+
 # ── delete_file root guard ────────────────────────────────────────────────────
 class DeleteFileRootGuardTests(unittest.TestCase):
     def setUp(self):
@@ -204,6 +234,32 @@ class DeleteFileRootGuardTests(unittest.TestCase):
         result = base_agent.delete_file(str(f))
         self.assertIn("success", result)
         self.assertFalse(f.exists())
+
+
+class MoveFileRootGuardTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp_root = ROOT / ".tmp-tests"
+        self._tmp_root.mkdir(exist_ok=True)
+        self._tmp = self._tmp_root / f"move-guard-{uuid.uuid4().hex}"
+        self._tmp.mkdir()
+        base_agent.sync_work_dir(str(self._tmp))
+
+    def tearDown(self):
+        base_agent.sync_work_dir(str(ROOT))
+        shutil.rmtree(self._tmp_root, ignore_errors=True)
+
+    def test_move_file_blocks_root_dir(self):
+        result = base_agent.move_file(str(self._tmp), str(self._tmp_root / "renamed-root"))
+        self.assertIn("error", result)
+        self.assertIn("ra", result["error"].lower())
+
+    def test_move_file_allows_subpath(self):
+        source = self._tmp / "a.txt"
+        source.write_text("hola")
+        result = base_agent.move_file(str(source), str(self._tmp / "nested" / "b.txt"))
+        self.assertIn("success", result)
+        self.assertFalse(source.exists())
+        self.assertTrue((self._tmp / "nested" / "b.txt").exists())
 
 
 # ── write_file size limit ─────────────────────────────────────────────────────

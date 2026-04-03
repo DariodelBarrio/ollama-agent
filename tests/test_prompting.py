@@ -67,6 +67,35 @@ class PromptingTests(unittest.TestCase):
         # With Jinja2 {% if %} blocks, empty vars produce no content
         self.assertNotIn("None", rendered)
 
+    def test_prompts_do_not_require_reasoning_tags(self):
+        local_rendered = agent_prompting.render_prompt_template(
+            "local_system_prompt.txt",
+            work_dir="/tmp/proj",
+            desktop="/tmp/Desktop",
+            project_context="",
+            mode_section="",
+        )
+        hybrid_rendered = agent_prompting.render_prompt_template(
+            "hybrid_system_prompt.txt",
+            work_dir="/tmp/proj",
+            desktop="/tmp/Desktop",
+            project_context="",
+            memories="",
+        )
+        self.assertNotIn("<thought>", local_rendered)
+        self.assertNotIn("<think>", local_rendered)
+        self.assertNotIn("<thought>", hybrid_rendered)
+        self.assertNotIn("<think>", hybrid_rendered)
+
+    def test_hidden_reasoning_filter_strips_internal_blocks(self):
+        flt = agent_prompting.HiddenReasoningFilter()
+        part1 = flt.feed("visible <think>hidden")
+        part2 = flt.feed(" more</think> text")
+        part3 = flt.finish()
+        self.assertEqual(part1, "visible ")
+        self.assertEqual(part2, "")
+        self.assertEqual(part3, " text")
+
     def test_build_system_prompt_uses_jinja2_override_template(self):
         class Logger:
             def error(self, *args, **kwargs):

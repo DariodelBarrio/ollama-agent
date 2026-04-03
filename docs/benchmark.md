@@ -1,234 +1,274 @@
 # Benchmark
 
-Benchmark mínimo y reproducible para Ollama Agent. Tres tareas pequeñas con
-criterios de éxito verificables. Sin números fabricados: este documento define
-la metodología; los resultados se publican cuando hay una ejecución completa
-y reproducible.
+This repository includes a minimal benchmark workflow that is reproducible,
+small in scope, and explicit about what it does not measure.
 
-## Diseño
+It is intended to answer a narrow question:
 
-### Por qué estas tareas
+Can the agent complete a few concrete coding tasks in this repository without
+breaking the baseline test suite?
 
-Se eligieron tareas que:
+It is not intended to prove general productivity, model quality, or superiority
+over other tools.
 
-- Cubren el flujo principal del agente: leer, editar, crear.
-- Tienen criterio de éxito binario y verificable (no dependen de juicio estético).
-- Se pueden reproducir en cualquier máquina con el repo clonado.
-- No requieren conocimiento externo al propio codebase.
+## Current Status
 
-### Qué se mide
+What exists today:
 
-| Métrica | T1 | T2 | T3 |
-|---|---|---|---|
-| Precisión del output | Manual | Automático | Automático |
-| Tiempo de respuesta | Cronómetro | Cronómetro | Cronómetro |
-| Número de tool calls | Manual (log) | Manual (log) | Manual (log) |
-| Regresión (tests pasan) | Post-run | Post-run | Post-run |
+- fixed benchmark tasks
+- a benchmark helper script: [`scripts/run_benchmark.py`](../scripts/run_benchmark.py)
+- automated verification for two tasks
+- structured JSON output for environment and results
 
-### Qué no se mide (aún)
+What does not exist today:
 
-- Comparativa con Aider u OpenCode: requiere entorno homogéneo con las tres herramientas instaladas.
-- Calidad de código generado más allá de corrección sintáctica.
-- Uso de tokens (la variante local no expone contadores por defecto).
+- official benchmark numbers published by the repository
+- external-tool comparisons
+- fully automated end-to-end execution of the agent itself
 
----
+No benchmark results should be inferred from this document.
 
-## Preparación
+## Benchmark Scope
+
+The benchmark currently covers three task types:
+
+| Task | Type | Verification |
+|---|---|---|
+| T1 | reading and analysis | manual |
+| T2 | targeted file edit | automatic |
+| T3 | file creation | automatic |
+
+This is deliberately small. The goal is reproducibility and defensibility, not
+coverage of every agent capability.
+
+## Metrics
+
+Each benchmark run should record:
+
+- model
+- backend
+- agent entry point used
+- hardware summary
+- commit benchmarked
+- whether the git tree was dirty
+- task success or failure
+- per-task elapsed time in seconds
+- per-task tool-call count
+- unit test status before the run
+- unit test status after the run
+
+The helper script captures environment data and stores results in JSON. Manual
+metrics such as time and tool-call counts are passed explicitly to the report
+step instead of being guessed.
+
+## Exact Workflow
+
+### 1. Prepare the benchmark workspace
 
 ```bash
-# Desde la raíz del repo
 python scripts/run_benchmark.py setup
 ```
 
-El script crea los fixtures necesarios en `benchmark_run/` e imprime los prompts
-exactos para cada tarea. Anota la hora de inicio antes de pegar cada prompt.
+This creates:
 
-Lanza el agente con `--dir` apuntando a la raíz del repo:
+- `benchmark_run/manifest.json`
+- `benchmark_run/prompts.txt`
+- benchmark fixtures under `benchmark_run/T2/` and `benchmark_run/T3/`
+
+`manifest.json` is the source of truth for prompts, success criteria, and the
+expected current T1 pattern count.
+
+### 2. Run the baseline unit tests
+
+```bash
+python scripts/run_benchmark.py run-tests --label before
+```
+
+This stores `benchmark_run/unit_tests_before.json`.
+
+### 3. Launch the agent
+
+From the repository root, launch one of the canonical entry points.
+
+Local example:
 
 ```bash
 python src/agent.py --model <MODEL> --dir .
 ```
 
----
+Hybrid example:
 
-## Tareas
-
-### T1 — Lectura y análisis `[verificación manual]`
-
-**Prompt exacto:**
-
-```
-Lee common_runtime.py. ¿Cuántos patrones regex tiene BLOCKED_COMMAND_PATTERNS?
-Lista todos con una descripción de qué bloquea cada uno.
+```bash
+python src/hybrid/agent.py --model <MODEL> --dir . --backend <local|groq|auto>
 ```
 
-**Criterio de éxito:**
+### 4. Execute the exact benchmark prompts
 
-- El agente usa la tool `read_file` o `grep` para leer el archivo (no adivina).
-- Lista los 15 patrones presentes en la variable.
-- La descripción de cada patrón es correcta (no inventa comportamientos).
+Read them from:
 
-**Cómo registrar:**
-
-| Campo | Valor |
-|---|---|
-| Patrones listados | / 15 |
-| Patrones correctos | / 15 |
-| Tool calls usados | |
-| Tiempo (s) | |
-| Resultado | PASS / FAIL |
-
-Criterio de PASS: todos los patrones presentes y descripciones correctas.
-
----
-
-### T2 — Edición puntual `[verificación automática]`
-
-**Prompt exacto** (generado por `setup`, incluye la ruta relativa real):
-
-```
-En benchmark_run/T2/config.py, cambia el valor de MAX_RETRIES
-de 3 a 5. No toques ninguna otra línea.
+```text
+benchmark_run/prompts.txt
 ```
 
-**Fixture inicial** (`benchmark_run/T2/config.py`):
+The prompts are generated by the script so they stay aligned with the current
+repository state.
 
-```python
-# Fixture T2 — benchmark Ollama Agent (no eliminar este comentario)
-MAX_RETRIES = 3
-TIMEOUT_SECONDS = 30
-```
-
-**Estado esperado tras la tarea:**
-
-```python
-# Fixture T2 — benchmark Ollama Agent (no eliminar este comentario)
-MAX_RETRIES = 5
-TIMEOUT_SECONDS = 30
-```
-
-**Verificación:**
+### 5. Verify automated tasks
 
 ```bash
 python scripts/run_benchmark.py check
 ```
 
-Criterio de PASS: `MAX_RETRIES = 5`, comentario intacto, `TIMEOUT_SECONDS` sin cambios.
+This verifies T2 and T3 automatically and prints the current manual criterion
+for T1.
 
----
-
-### T3 — Creación de archivo `[verificación automática]`
-
-**Prompt exacto** (generado por `setup`, incluye la ruta relativa real):
-
-```
-Crea benchmark_run/T3/utils.py con dos funciones:
-  add(a, b)      -> devuelve a + b
-  multiply(a, b) -> devuelve a * b
-Sin imports, sin docstrings, sin nada más.
-```
-
-**Estado esperado:**
-
-```python
-def add(a, b):
-    return a + b
-
-def multiply(a, b):
-    return a * b
-```
-
-**Verificación:**
+### 6. Run the unit tests again
 
 ```bash
-python scripts/run_benchmark.py check
+python scripts/run_benchmark.py run-tests --label after
 ```
 
-Criterio de PASS: archivo existe, define `add` y `multiply`, sintaxis Python válida.
+This stores `benchmark_run/unit_tests_after.json`.
 
----
-
-## Verificación y reporte
+### 7. Write the benchmark result JSON
 
 ```bash
-# Verificar T2 y T3 automáticamente
-python scripts/run_benchmark.py check
-
-# Generar informe JSON archivable (--t1-pass yes/no tras revisión manual de T1)
-python scripts/run_benchmark.py report --model qwen2.5-coder:14b --t1-pass yes
+python scripts/run_benchmark.py report \
+  --model qwen2.5-coder:14b \
+  --backend ollama \
+  --hardware "RTX 5070 / Ryzen 7 / 32GB RAM" \
+  --agent-entry src/agent.py \
+  --api-base http://localhost:11434/v1 \
+  --t1-pass yes \
+  --t1-time-s 18.4 \
+  --t2-time-s 11.2 \
+  --t3-time-s 9.7 \
+  --t1-tool-calls 3 \
+  --t2-tool-calls 2 \
+  --t3-tool-calls 1
 ```
 
-El informe se guarda en `benchmark_run/result_YYYYMMDD_HHMM_MODEL.json`.
+If the agent was run through the Hybrid entry point, change `--agent-entry` and
+`--backend` accordingly.
 
----
+## Task Definitions
 
-## Suite de tests unitarios
+The script writes the exact prompts into `benchmark_run/prompts.txt`, but the
+task intent is stable:
 
-Los tests del repo son parte del benchmark base. Deben pasar antes y después
-de cada ejecución de las tareas:
+### T1: Read and analyze
 
-```bash
-python -m unittest discover -s tests -p "test_*.py"
+The agent must inspect `common_runtime.py` and enumerate the current regex
+patterns in `BLOCKED_COMMAND_PATTERNS`.
+
+Success criteria:
+
+- the answer is based on reading the file
+- the pattern count matches the current repository state
+- no patterns are invented or omitted
+- the description of each pattern is materially correct
+
+This task stays manual because the output is explanatory rather than a file
+artifact.
+
+### T2: Targeted edit
+
+The agent must change only `MAX_RETRIES = 3` to `MAX_RETRIES = 5` in the
+fixture file.
+
+Success criteria:
+
+- `MAX_RETRIES = 5`
+- the fixture comment is still present
+- `TIMEOUT_SECONDS = 30` is still present
+- `MAX_RETRIES = 3` no longer appears
+
+### T3: File creation
+
+The agent must create `utils.py` with exactly two simple functions: `add` and
+`multiply`.
+
+Success criteria:
+
+- the file exists
+- Python syntax is valid
+- both functions exist
+- there are no unexpected top-level statements
+
+## Output Format
+
+The benchmark report is stored as JSON in:
+
+```text
+benchmark_run/result_YYYYMMDD_HHMM_MODEL.json
 ```
 
-Si alguna tarea rompe los tests, la ejecución no es válida.
+The report includes:
 
----
+- benchmark version
+- environment and hardware metadata
+- current task manifest
+- automated check results
+- manual task result for T1 when provided
+- per-task times and tool-call counts
+- baseline test results before and after
 
-## Entorno mínimo a registrar
+## Template
 
-Para que un resultado sea comparable, el informe JSON debe incluir:
-
-| Campo | Ejemplo |
-|---|---|
-| `git_commit` | `5aa6438...` |
-| `git_dirty` | `false` |
-| `model` | `qwen2.5-coder:14b` |
-| `date_utc` | `2026-04-03T14:00:00Z` |
-| `python` | `3.12.2` |
-| `platform` | `Windows-11-...` |
-| `processor` | `Intel Core i7-...` / GPU si es relevante |
-
-El script `report` captura estos campos automáticamente del entorno de ejecución.
-
----
-
-## Plantilla de resultados
+Example shape only. The values below are placeholders, not results:
 
 ```json
 {
+  "benchmark_version": 1,
   "env": {
     "date_utc": "",
     "model": "",
+    "backend": "",
+    "agent_entry": "",
+    "api_base": "",
+    "hardware": "",
     "python": "",
     "platform": "",
     "processor": "",
     "git_commit": "",
     "git_dirty": false
   },
-  "tasks": {
-    "T1": { "pass": null,  "auto": false, "reason": "" },
-    "T2": { "pass": false, "auto": true,  "reason": "" },
-    "T3": { "pass": false, "auto": true,  "reason": "" }
+  "manifest": {
+    "tasks": {},
+    "test_command": []
   },
-  "notes": {
-    "T1_tool_calls": 0,
-    "T2_tool_calls": 0,
-    "T3_tool_calls": 0,
-    "T1_time_s": 0,
-    "T2_time_s": 0,
-    "T3_time_s": 0,
-    "unit_tests_before": "OK / FAIL",
-    "unit_tests_after": "OK / FAIL"
+  "results": {
+    "tasks": {
+      "T1": { "pass": null, "auto": false, "reason": "" },
+      "T2": { "pass": false, "auto": true, "reason": "" },
+      "T3": { "pass": false, "auto": true, "reason": "" }
+    },
+    "metrics": {
+      "T1": { "time_s": null, "tool_calls": null },
+      "T2": { "time_s": null, "tool_calls": null },
+      "T3": { "time_s": null, "tool_calls": null }
+    },
+    "unit_tests": {
+      "before": null,
+      "after": null
+    },
+    "notes": ""
   }
 }
 ```
 
-El campo `notes` se rellena manualmente; los demás los genera `report`.
+## What Makes This Defensible
 
----
+- prompts are generated and stored, not paraphrased from memory
+- T1 ground truth is derived from the current source tree, not hard-coded
+- automated tasks verify concrete repository artifacts
+- environment metadata and git commit are captured in the report
+- the test suite is part of the benchmark workflow
+- no numbers are published unless a real run produced them
 
-## Resultados publicados
+## Limitations
 
-*Ninguno todavía.* Los resultados se publicarán cuando haya una ejecución
-completa con las tres tareas y los tests unitarios verificados.
+- T1 still requires manual review
+- tool-call counts are manual unless the logging workflow is standardized
+- the benchmark is local and single-repository in scope
+- no external comparisons are included unless they are actually executed

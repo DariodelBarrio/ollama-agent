@@ -12,7 +12,7 @@ Los templates usan Jinja2. Variables disponibles según variante:
 | `{{ work_dir }}` | Directorio de trabajo actual | Sí | Sí |
 | `{{ project_context }}` | Contenido de CLAUDE.md / README.md / .cursorrules | Sí | Sí |
 | `{{ mode_section }}` | Sección del modo activo (`code`, `architect`, `research`) | Sí | No |
-| `{{ desktop }}` | Ruta del escritorio del usuario | Sí | No |
+| `{{ desktop }}` | Ruta del escritorio del usuario | Sí | Sí |
 | `{{ memories }}` | Memorias persistentes de sesiones anteriores (SQLite) | No | Sí |
 
 ## Ejemplo mínimo
@@ -41,5 +41,6 @@ Contexto: $project_context
 ## Notas
 
 - Mantén las instrucciones críticas (seguridad, uso de herramientas) al inicio del template.
+- No dependas de formatos como `<thought>` o `<think>`; el agente no debería necesitarlos para funcionar.
 - Este archivo no se carga automáticamente: úsalo como plantilla y referencia.
 - Las variables no definidas se renderizan como cadena vacía, no provocan error.

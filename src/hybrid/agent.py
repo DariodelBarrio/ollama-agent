@@ -1,9 +1,9 @@
 ﻿"""
-Agente Hibrido Dual-Backend
-Motor: SGLang · vLLM · Ollama (RTX 5070 local) + Groq (nube)
-Router inteligente · Self-healing · Actor-Crítico · TUI profesional · Comandos /slash
+Agente Hybrid de Ollama Agent.
+Motor: SGLang · vLLM · Ollama (local) + Groq (nube)
+Router inteligente · self-healing · actor-critico · comandos /slash
 
-Uso: python agent.py [--model MODEL] [--dir DIR] [--backend local|groq|auto]
+Uso: python src/hybrid/agent.py [--model MODEL] [--dir DIR] [--backend local|groq|auto]
      [--local-url URL] [--groq-model MODEL] [--ctx N] [--temp F] [--critic] [--tag TAG]
      [--sandbox docker] [--sandbox-image IMAGE]
 """
@@ -13,9 +13,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+_SRC_ROOT = Path(__file__).resolve().parents[1]
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
+for _path in (str(_SRC_ROOT), str(_REPO_ROOT)):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
 
 from agent_prompting import build_system_prompt as render_shared_prompt
 from agent_prompting import load_project_context
@@ -405,14 +407,14 @@ SLASH_HELP = """[bold]Comandos disponibles:[/]
   [bold cyan]/help[/]                    — muestra esta ayuda
   [bold cyan]/clear[/]                   — nueva sesión (borra historial)
   [bold cyan]/switch [local|groq|auto][/]   — fuerza backend
-  [bold cyan]/model [nombre][/]          — cambia modelo local o cloud
+  [bold cyan]/model [nombre][/]          — cambia modelo local o Groq
   [bold cyan]/ctx[/]                     — muestra uso estimado de contexto
   [bold cyan]/cost[/]                    — estadísticas de uso local/groq
   [bold cyan]/critic [on|off][/]         — activa/desactiva modo Actor-Crítico
   [bold cyan]/ast[/]                     — muestra esqueleto AST del proyecto
   [bold cyan]/plan [tarea][/]            — genera un plan antes de ejecutar
   [bold cyan]/dream[/]                   — extrae memorias valiosas de esta sesión
-  [bold cyan]/memory [list|forget KEY|clear][/] — gestiona memorias persistentes
+  [bold cyan]/memory [list|search Q|forget KEY|clear][/] — gestiona memorias persistentes
   [bold cyan]/compact[/]                 — compacta el contexto con resumen LLM"""
 
 
@@ -500,7 +502,8 @@ class Agent:
 
         # prompt_toolkit session con historial en el directorio del script
         history_path = str(_SCRIPT_DIR / ".history")
-        if PTOOLKIT:
+        simple_input = os.getenv("OLLAMA_AGENT_SIMPLE_INPUT", "").strip().lower() in {"1", "true", "yes"}
+        if PTOOLKIT and not simple_input:
             pt_style = PTStyle.from_dict({"prompt": "#5B9BD5 bold"})
             self.pt_session = PromptSession(
                 history=FileHistory(history_path),
@@ -574,7 +577,7 @@ class Agent:
                 console.print(f"[{C_OK}]  ✓ {msg}[/]")
             else:
                 actual = self.groq_model if self.selected_backend == "groq" else self.model
-                origen = "cloud" if self.selected_backend == "groq" else "local"
+                origen = "groq" if self.selected_backend == "groq" else "local"
                 console.print(f"[{C_DIM}]  Modelo actual ({origen}): {actual}[/]")
         elif c == "/ctx":
             chars = sum(len(str(m.get("content",""))) for m in self.messages)
@@ -877,8 +880,9 @@ No repitas lo que se hizo, solo señala problemas si los hay."""
         dream_tools = [t for t in TOOLS if t["function"]["name"] == "save_memory"]
         prompt = (f"Analiza esta sesión y extrae hasta 6 hechos valiosos para futuras sesiones.\n"
                   f"Llama save_memory(key, value, category) por cada uno.\n"
-                  f"Categorías: facts (info del proyecto), patterns (cómo trabaja el usuario), "
-                  f"preferences (estilo preferido), bugs (bugs encontrados/resueltos).\n"
+                  f"Categorías válidas: fact (info del proyecto), pattern (cómo trabaja el usuario), "
+                  f"preference (estilo preferido), bug (bugs encontrados/resueltos), "
+                  f"project (decisiones duraderas del proyecto).\n"
                   f"Solo lo realmente útil para retomar el trabajo. Si no hay nada, no guardes.\n\n"
                   f"Sesión:\n{session_text}")
         try:
@@ -1159,15 +1163,15 @@ def select_model_menu(local_url: str) -> str:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Agente hibrido local/cloud para Ollama Agent")
-    parser.add_argument("--model",        default=None,                    help="Modelo local o Groq (omitir = menú)")
+    parser = argparse.ArgumentParser(description="Agente Hybrid local/Groq para Ollama Agent")
+    parser.add_argument("--model",        default=None,                    help="Modelo principal; si coincide con uno de Groq, selecciona Groq salvo override")
     parser.add_argument("--dir",          default=".",                     help="Directorio de trabajo")
-    parser.add_argument("--tag",          default="HYBRID",               help="Tag en el header")
-    parser.add_argument("--ctx",          type=int,   default=32768,       help="Tokens máximos de respuesta")
+    parser.add_argument("--tag",          default="HYBRID",               help="Etiqueta visible en el header")
+    parser.add_argument("--ctx",          type=int,   default=32768,       help="Ventana de contexto o presupuesto de tokens del backend local")
     parser.add_argument("--temp",         type=float, default=0.15,        help="Temperatura 0.0-1.0")
-    parser.add_argument("--backend",    default="auto",                     choices=["auto","local","groq"])
-    parser.add_argument("--local-url",  default="http://localhost:11434/v1", help="URL del servidor local (SGLang/vLLM/Ollama)")
-    parser.add_argument("--groq-model", default="llama-3.3-70b-versatile",  help="Modelo de Groq")
+    parser.add_argument("--backend",    default="auto",                     choices=["auto","local","groq"], help="Estrategia de backend: router automático, solo local o solo Groq")
+    parser.add_argument("--local-url",  default="http://localhost:11434/v1", help="URL OpenAI-compatible del backend local")
+    parser.add_argument("--groq-model", default="llama-3.3-70b-versatile",  help="Modelo de respaldo para llamadas a Groq")
     parser.add_argument("--critic",       action="store_true",             help="Activar modo Actor-Crítico")
     parser.add_argument("--system-prompt", default=None,
                         help="Ruta de archivo para usar como prompt de sistema")

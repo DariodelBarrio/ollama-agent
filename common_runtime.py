@@ -23,6 +23,7 @@ BLOCKED_COMMAND_PATTERNS = [
     r'poweroff\b',
     r'mkfs\b',
     r'diskpart\b',
+    r'\bdd\b.*\bof=/dev/',
     r'chmod\s+777\b',
     r'\bcmd\s*/c\s+.*\b(del|erase|rd|rmdir|format|shutdown)\b',
     r'\bpowershell(\.exe)?\b.*\b(remove-item|del|rm|rmdir)\b',
@@ -32,6 +33,8 @@ BLOCKED_COMMAND_PATTERNS = [
     r'invoke-webrequest\b.*\|',
     # git clean destruye archivos no rastreados del workspace
     r'\bgit\s+clean\b',
+    r'\bgit\s+reset\s+--hard\b',
+    r'\bgit\s+checkout\s+--\b',
 ]
 
 
@@ -58,7 +61,7 @@ def is_safe_command(command: str) -> tuple[bool, str]:
     lowered = command.lower()
     for pattern in BLOCKED_COMMAND_PATTERNS:
         if re.search(pattern, lowered):
-            return False, "Comando bloqueado por seguridad"
+            return False, f"Comando bloqueado por seguridad: coincide con '{pattern}'"
     return True, ""
 
 

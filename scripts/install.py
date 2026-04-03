@@ -1,8 +1,8 @@
 """Instala dependencias de forma multiplataforma.
 
 Uso:
-  python scripts/install.py               # instala requirements.txt
-  python scripts/install.py --hybrid      # instala requirements-hybrid.txt
+  python scripts/install.py               # instala requirements.txt (canónico base)
+  python scripts/install.py --hybrid      # instala requirements-hybrid.txt (canónico Hybrid)
   python scripts/install.py --mega        # alias legado de --hybrid
   python scripts/install.py --file path   # instala desde un requirements especifico
 """
@@ -27,9 +27,9 @@ def pip_install(requirements_file: Path) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Instalador multiplataforma de dependencias")
-    parser.add_argument("--hybrid", action="store_true", help="Instala requirements-hybrid.txt")
-    parser.add_argument("--mega", action="store_true", help="Alias legado de --hybrid")
+    parser = argparse.ArgumentParser(description="Instalador multiplataforma de dependencias de Ollama Agent")
+    parser.add_argument("--hybrid", action="store_true", help="Instala requirements-hybrid.txt (nombre canonico)")
+    parser.add_argument("--mega", action="store_true", help="Alias legado de --hybrid; mantenido por compatibilidad")
     parser.add_argument(
         "--file",
         type=Path,
