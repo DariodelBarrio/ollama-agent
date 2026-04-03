@@ -4,6 +4,11 @@ Terminal-first coding agent for OpenAI-compatible backends.
 
 Current release: `v0.1.0` ([`VERSION`](VERSION))
 
+Split repositories:
+
+- Windows legacy `.bat` repo: `https://github.com/DariodelBarrio/ollama-agent-windows-bat`
+- TUI launcher repo: `https://github.com/DariodelBarrio/ollama-agent-tui`
+
 Ollama Agent is a local-first CLI that can inspect a repository, read and edit
 files, run shell commands inside the workspace, and answer with a concise
 terminal workflow. The repository currently ships two variants built on the
@@ -158,6 +163,12 @@ direct-script flow without the TUI.
 
 The TUI-specific compatibility changes do not replace or remove the legacy
 `.bat` entry points.
+
+If you want those paths as standalone repositories instead of the combined
+repo, use:
+
+- `ollama-agent-windows-bat` for the Windows `.bat` workflow
+- `ollama-agent-tui` for the compiled terminal-first launcher workflow
 
 ## Architecture
 
