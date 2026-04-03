@@ -15,6 +15,8 @@ Legado:
 - Los `.bat` de esta carpeta solo delegan a `src/hybrid/windows/*.bat`
 - `requirements-mega.txt` y `--mega` siguen existiendo como alias de compatibilidad
 - Para GPUs con menos VRAM, tambien existe `LOCAL CODER [qwen2.5-coder-7b].bat`
+- `START OLLAMA.bat` intenta levantar el backend local
+- `INSTALL MODEL [qwen2.5-coder-7b].bat` descarga el modelo recomendado para GPUs mas justas
 
 No se versionan artefactos runtime en esta carpeta. Los logs e historial deben
 quedar ignorados localmente.
