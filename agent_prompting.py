@@ -1,3 +1,10 @@
+"""Helpers para construir prompts del agente y cargar contexto del proyecto.
+
+El objetivo de este módulo es desacoplar el renderizado del prompt de los
+agentes concretos. Así ambos backends comparten la misma lógica de plantillas
+y el mismo fallback cuando falta Jinja2 o cuando una plantilla falla.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -17,6 +24,12 @@ DEFAULT_CONTEXT_FILES = ("CLAUDE.md", "README.md", ".cursorrules")
 
 
 def load_project_context(work_dir: str, max_chars: int = 16_000) -> str:
+    """Carga el primer archivo de contexto conocido que exista en el proyecto.
+
+    Se priorizan archivos estilo instrucciones globales (`CLAUDE.md`,
+    `README.md`, `.cursorrules`) para inyectar solo una vista resumida del
+    proyecto en el prompt de sistema.
+    """
     base = Path(work_dir)
     for name in DEFAULT_CONTEXT_FILES:
         candidate = base / name
@@ -79,6 +92,7 @@ def build_system_prompt(
     }
     try:
         if system_prompt_path:
+            # Los overrides permiten personalizar el prompt sin editar el repo.
             raw_override = system_prompt_path.read_text(encoding="utf-8")
             if JINJA2_AVAILABLE and any(token in raw_override for token in ("{{", "{%", "{#")):
                 env = _jinja_env()

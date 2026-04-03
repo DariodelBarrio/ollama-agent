@@ -1,3 +1,10 @@
+"""Runtime de herramientas locales/web consumidas por los agentes.
+
+`ToolRuntime` concentra las operaciones con archivos, shell y web, y devuelve
+siempre diccionarios serializables para que el modelo pueda razonar sobre
+resultados y errores de forma uniforme.
+"""
+
 from __future__ import annotations
 
 import difflib
@@ -48,19 +55,27 @@ def _sanitize_output(text: str, max_chars: int = 20_000) -> str:
 
 
 class ToolRuntime:
+    """Contenedor con estado mínimo del workspace activo.
+
+    El runtime guarda `work_dir` y `root_dir` para que los agentes puedan
+    cambiar de directorio sin perder el perímetro de seguridad.
+    """
     def __init__(self, work_dir: str = ".", root_dir: Optional[str] = None, os_name: Optional[str] = None):
         self.os_name = os_name or platform.system()
         self.work_dir = str(Path(work_dir).resolve())
         self.root_dir = str(Path(root_dir).resolve()) if root_dir else self.work_dir
 
     def set_workspace(self, work_dir: str, root_dir: Optional[str] = None) -> None:
+        """Actualiza el directorio actual y el límite raíz permitido."""
         self.work_dir = str(Path(work_dir).resolve())
         self.root_dir = str(Path(root_dir).resolve()) if root_dir else self.work_dir
 
     def resolve(self, path: str) -> Path:
+        """Resuelve una ruta dentro del workspace validando escapes."""
         return resolve_in_root(path, self.work_dir, self.root_dir)
 
     def run_command(self, command: str, shell: str = "auto", timeout: int = 60) -> dict:
+        """Ejecuta un comando respetando shell, timeout y sanitización."""
         try:
             ok, reason = is_safe_command(command)
             if not ok:
@@ -86,6 +101,7 @@ class ToolRuntime:
             return {"error": str(exc)}
 
     def read_file(self, path: str) -> dict:
+        """Lee un archivo devolviendo contenido numerado para referencias estables."""
         try:
             resolved = self.resolve(path)
             if not resolved.exists():
@@ -102,6 +118,7 @@ class ToolRuntime:
             return {"error": str(exc)}
 
     def write_file(self, path: str, content: str) -> dict:
+        """Escribe un archivo completo creando directorios intermedios si faltan."""
         try:
             resolved = self.resolve(path)
             resolved.parent.mkdir(parents=True, exist_ok=True)
@@ -159,6 +176,8 @@ class ToolRuntime:
 
             # ── regex branch (unchanged) ───────────────────────────────────────
             if use_regex:
+                # El branch regex mantiene semántica explícita y no intenta
+                # heurísticas adicionales para no introducir reemplazos ambiguos.
                 try:
                     pattern = re.compile(old_text, re.MULTILINE)
                 except re.error as exc:
@@ -270,6 +289,7 @@ class ToolRuntime:
     # ── rest of tools (unchanged) ─────────────────────────────────────────────
 
     def find_files(self, pattern: str, path: str = ".") -> dict:
+        """Busca archivos por glob relativo a un directorio concreto."""
         try:
             resolved = self.resolve(path)
             matches = sorted(resolved.glob(pattern))
@@ -282,6 +302,7 @@ class ToolRuntime:
             return {"error": str(exc)}
 
     def grep(self, pattern: str, path: str = ".", extension: str = "") -> dict:
+        """Busca coincidencias regex acotando tamaño y número de resultados."""
         try:
             resolved = self.resolve(path)
             results = []
@@ -314,6 +335,7 @@ class ToolRuntime:
             return {"error": str(exc)}
 
     def list_directory(self, path: str = ".") -> dict:
+        """Lista entradas del directorio con tipo y tamaño básico."""
         try:
             resolved = self.resolve(path)
             if not resolved.exists():
@@ -332,6 +354,7 @@ class ToolRuntime:
             return {"error": str(exc)}
 
     def delete_file(self, path: str) -> dict:
+        """Elimina un archivo o directorio dentro del workspace permitido."""
         try:
             resolved = self.resolve(path)
             if not resolved.exists():
@@ -345,6 +368,7 @@ class ToolRuntime:
             return {"error": str(exc)}
 
     def create_directory(self, path: str) -> dict:
+        """Crea un directorio y sus padres si no existen."""
         try:
             resolved = self.resolve(path)
             resolved.mkdir(parents=True, exist_ok=True)
@@ -353,6 +377,7 @@ class ToolRuntime:
             return {"error": str(exc)}
 
     def move_file(self, src: str, dst: str) -> dict:
+        """Mueve o renombra una ruta manteniéndose dentro del workspace."""
         try:
             source = self.resolve(src)
             target = self.resolve(dst)
@@ -365,6 +390,7 @@ class ToolRuntime:
             return {"error": str(exc)}
 
     def search_web(self, query: str, max_results: int = 5) -> dict:
+        """Realiza una búsqueda web simple y devuelve resultados resumidos."""
         if not WEB_AVAILABLE:
             return {"error": "Instala: pip install duckduckgo-search requests beautifulsoup4"}
         try:
@@ -387,6 +413,7 @@ class ToolRuntime:
             return {"error": str(exc)}
 
     def fetch_url(self, url: str, max_chars: int = 4000) -> dict:
+        """Descarga una URL y extrae texto legible para el modelo."""
         if not WEB_AVAILABLE:
             return {"error": "Instala: pip install requests beautifulsoup4"}
         try:
@@ -403,6 +430,7 @@ class ToolRuntime:
             return {"error": str(exc)}
 
     def change_directory(self, path: str) -> dict:
+        """Actualiza el `cwd` activo sin permitir salir de `root_dir`."""
         try:
             candidate = Path(path)
             if not candidate.is_absolute():
@@ -609,6 +637,11 @@ _WEB_TOOL_DEFINITIONS = [
 
 
 def build_tool_definitions(include_web: bool = True, extra_tools: Optional[list[dict]] = None) -> list[dict]:
+    """Construye la lista final de tools publicada al modelo.
+
+    Se clona la definición base para evitar que un agente mutile estructuras
+    compartidas entre sesiones o entre backends.
+    """
     tools = deepcopy(_BASE_TOOL_DEFINITIONS)
     if include_web and WEB_AVAILABLE:
         tools.extend(deepcopy(_WEB_TOOL_DEFINITIONS))

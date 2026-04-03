@@ -126,6 +126,11 @@ def build_system_prompt(work_dir: str, project_context: str,
 
 # ── Agent class ───────────────────────────────────────────────────────────────
 class Agent:
+    """Agente local sobre backend OpenAI-compatible (p.ej. Ollama).
+
+    Mantiene el historial de mensajes, publica tools al modelo y ejecuta el
+    bucle tool-call -> resultado -> siguiente respuesta hasta cerrar la tarea.
+    """
     MODE_CONFIGS = {
         "code": {
             "temperature": 0.05,
@@ -184,6 +189,7 @@ class Agent:
         self.logger = _make_logger(f"agent.{id(self)}", log_path)
 
     def _build_options(self) -> dict:
+        """Devuelve parámetros de generación ligados al modo activo."""
         return {
             "temperature": self.MODE_CONFIGS[self.current_mode]["temperature"],
             "top_p":       0.85,
@@ -191,6 +197,11 @@ class Agent:
         }
 
     def _trim_history(self, max_pairs: int = 20) -> list:
+        """Recorta el historial manteniendo el system prompt intacto.
+
+        Cada iteración puede añadir mensajes `assistant` y `tool`, así que el
+        recorte se hace en bloques de conversación en lugar de por mensaje suelto.
+        """
         system = [m for m in self.messages if m["role"] == "system"]
         rest   = [m for m in self.messages if m["role"] != "system"]
         return system + rest[-(max_pairs * 4):]
@@ -204,6 +215,8 @@ class Agent:
         t_start = time.monotonic()
 
         def _drain(stream_iter):
+            # El stream puede mezclar texto visible, bloques de pensamiento y
+            # tool calls parciales. Este parser recompone esas tres señales.
             state = None
             thought_buf: list[str] = []
             buf = ""
@@ -301,6 +314,7 @@ class Agent:
         with Live(Spinner("dots", text="Pensando... 0s", style=spinner_color),
                   console=console, transient=True, refresh_per_second=4) as live:
             def _tick():
+                # El spinner vive en un thread aparte para no bloquear el stream.
                 while first_output[0]:
                     elapsed = time.monotonic() - t_start
                     live.update(Spinner("dots", text=f"Pensando... {elapsed:.0f}s", style=spinner_color))
@@ -315,6 +329,8 @@ class Agent:
                 "num_predict":    -1,
             }}
             try:
+                # Se usa la API chat.completions porque varios servidores locales
+                # compatibles con OpenAI todavía exponen esta superficie.
                 _drain(self.client.chat.completions.create(
                     model=self.model,
                     messages=messages,
@@ -392,6 +408,7 @@ class Agent:
         return args
 
     def _invoke_tool(self, fn_name: str, fn_args: dict) -> dict:
+        """Ejecuta una tool capturando excepciones en formato uniforme."""
         fn = TOOL_MAP[fn_name]
         try:
             return fn(**fn_args)
@@ -402,6 +419,7 @@ class Agent:
             return {"error": f"Excepción ejecutando '{fn_name}': {e}"}
 
     def _validate_model(self) -> bool:
+        """Comprueba si el modelo pedido existe en el backend local."""
         try:
             available = [m.id for m in self.client.models.list().data]
             if self.model not in available:
@@ -418,6 +436,7 @@ class Agent:
             return True
 
     def run(self):
+        """Bucle principal REPL del agente local."""
         if not self._validate_model():
             sys.exit(1)
 
@@ -501,6 +520,8 @@ class Agent:
 
                 if tool_calls:
                     console.print()
+                    # Se registra el mensaje asistente con `tool_calls` para
+                    # conservar un historial compatible con la API OpenAI.
                     self.messages.append({
                         "role": "assistant",
                         "content": full_content or None,

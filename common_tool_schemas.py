@@ -1,3 +1,9 @@
+"""Schemas opcionales de validación para las herramientas expuestas al LLM.
+
+Cuando Pydantic está instalado, estos modelos permiten validar argumentos
+antes de invocar la herramienta real y devolver errores más útiles al modelo.
+"""
+
 from __future__ import annotations
 
 try:
@@ -10,6 +16,8 @@ except ImportError:
 
 
 if PYDANTIC_AVAILABLE:
+    # Cada schema refleja una tool disponible para que la validación sea
+    # consistente con las definiciones JSON enviadas al modelo.
     class RunCommandArgs(BaseModel):
         command: str = Field(..., description="Comando a ejecutar.")
         shell: str = Field("auto", description="Shell: 'auto', 'powershell', 'bash', 'sh', 'cmd'.")
@@ -91,4 +99,5 @@ if PYDANTIC_AVAILABLE:
         "change_directory": ChangeDirectoryArgs,
     }
 else:
+    # Fallback ligero cuando el entorno no incluye Pydantic.
     TOOL_SCHEMA_MAP = {}

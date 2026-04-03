@@ -73,6 +73,7 @@ _SCRIPT_DIR = Path(__file__).parent
 
 @contextmanager
 def _db_conn(db_path: Path):
+    """Abre una conexión SQLite transaccional y la cierra siempre al salir."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     try:
@@ -90,12 +91,18 @@ _CLOUD_PATTERNS = [
 
 
 class SmartRouter:
+    """Decide cuándo usar backend local y cuándo delegar en Groq.
+
+    La heurística es deliberadamente simple: tamaño aproximado del contexto y
+    patrones de tareas que suelen requerir más ventana o más capacidad.
+    """
     def __init__(self, ctx_threshold: int = 6000, force: Optional[str] = None):
         self.ctx_threshold = ctx_threshold
         self.force = force
         self.calls = {"local": 0, "groq": 0}
 
     def route(self, prompt: str, history_chars: int) -> tuple[str, str]:
+        """Devuelve `(backend, motivo)` para que la UI pueda explicarlo."""
         if self.force:
             return self.force, "forzado (/switch)"
         est_tokens = history_chars // 4
@@ -107,6 +114,7 @@ class SmartRouter:
         return "local", "tarea coding/local"
 
     def icon(self, backend: str) -> str:
+        """Etiqueta corta usada en la TUI."""
         return {"local": "⚡ LOCAL", "groq": "☁  GROQ"}.get(backend, backend)
 
     def record(self, backend: str):
@@ -133,6 +141,7 @@ class MemoryDB:
         self._migrate_json()
 
     def _init(self):
+        """Crea la tabla base, el índice FTS y sus triggers de sincronización."""
         with _db_conn(self.db_path) as c:
             c.executescript("""
                 CREATE TABLE IF NOT EXISTS memories (
@@ -270,15 +279,18 @@ class MemoryDB:
 _mem: Optional[MemoryDB] = None
 
 def save_memory(key: str, value: str, category: str = "fact", importance: int = 5) -> dict:
+    """Wrapper de tool para persistir memoria desde llamadas del LLM."""
     if _mem is None: return {"error": "Memoria no inicializada"}
     return _mem.save(key, value, category, importance)
 
 def memory_search(query: str, limit: int = 5) -> dict:
+    """Wrapper de tool para consultar memoria persistente."""
     if _mem is None: return {"error": "Memoria no inicializada"}
     results = _mem.search(query, limit)
     return {"query": query, "results": results, "count": len(results)}
 
 def delete_memory(key: str, category: str = "fact") -> dict:
+    """Wrapper de tool para borrar entradas de memoria persistente."""
     if _mem is None: return {"error": "Memoria no inicializada"}
     return _mem.delete(key, category)
 
@@ -331,7 +343,7 @@ def scan_project_ast(work_dir: str, max_files: int = 30) -> str:
     lines = [f"# Esqueleto AST de {wd.name}"]
     count = 0
 
-    # Python via ast module
+    # Python: se usa AST real para obtener una estructura fiable y barata en tokens.
     for f in sorted(wd.rglob("*.py")):
         if any(p in f.parts for p in [".git","__pycache__","node_modules",".venv","venv"]): continue
         if count >= max_files: break
@@ -351,7 +363,7 @@ def scan_project_ast(work_dir: str, max_files: int = 30) -> str:
                 count += 1
         except: pass
 
-    # JS/TS via regex
+    # JS/TS: aquí basta una aproximación por regex para no añadir dependencias.
     for ext in ("*.js", "*.ts", "*.tsx", "*.jsx"):
         for f in sorted(wd.rglob(ext)):
             if any(p in f.parts for p in [".git","node_modules","dist","build",".next"]): continue
@@ -423,6 +435,7 @@ def build_system_prompt(work_dir: str, project_context: str, memories: str = "")
 
 # ── Clase Agent ───────────────────────────────────────────────────────────────
 class Agent:
+    """Agente híbrido con router de backends, memoria y modo actor-crítico."""
     def __init__(self, model: str, work_dir: str, tag: str, ctx: int, temp: float,
                  local_url: str, groq_model: str, backend: str, critic: bool,
                  system_prompt_path: Optional[str] = None,
@@ -445,7 +458,8 @@ class Agent:
 
         self.selected_backend = backend if backend != "auto" else None
 
-        # Docker sandbox (optional)
+        # Sandbox opcional: solo intercepta run_command; el resto de tools siguen
+        # operando en el workspace local para no romper el flujo del agente.
         self._sandbox = None
         if sandbox == "docker":
             try:
@@ -465,7 +479,8 @@ class Agent:
             except ImportError:
                 console.print(f"[{C_ERR}]  ⚠ src/sandbox.py no encontrado — usando ejecución local.[/]")
 
-        # Clientes OpenAI-compatible
+        # Ambos clientes comparten interfaz OpenAI-compatible para minimizar
+        # bifurcaciones en el código del agente.
         self.local_client = OpenAI(
             base_url=local_url,
             api_key=os.getenv("LOCAL_API_KEY", "ollama"),
@@ -496,16 +511,19 @@ class Agent:
             self.pt_session = None
 
     def _client_for(self, backend: str):
+        """Selecciona cliente y modelo efectivos para este turno."""
         if backend == "groq" and self.groq_client:
             return self.groq_client, self.groq_model
         return self.local_client, self.model
 
     def _model_for(self, backend: str) -> str:
+        """Devuelve solo el identificador del modelo del backend elegido."""
         if backend == "groq":
             return self.groq_model
         return self.model
 
     def _set_model(self, model_name: str) -> str:
+        """Cambia el modelo y fija backend cuando el nombre implica Groq."""
         if model_name in {name for name, *_ in GROQ_MODELS}:
             self.groq_model = model_name
             self.selected_backend = "groq"
@@ -515,6 +533,7 @@ class Agent:
         return f"Modelo local cambiado a: {model_name}"
 
     def _get_input(self) -> str:
+        """Lee input usando prompt_toolkit si está disponible."""
         console.print()
         if self.pt_session:
             try:

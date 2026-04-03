@@ -93,7 +93,11 @@ _TOOL_RUNTIME: ToolRuntime = ToolRuntime(_WORK_DIR, _ROOT_DIR)
 
 
 def sync_work_dir(work_dir: str, root_dir: Optional[str] = None) -> None:
-    """Sync the shared tool runtime to a new working directory."""
+    """Sincroniza el runtime compartido con el workspace del agente activo.
+
+    Este módulo vive como singleton de proceso. Cada agente debe llamar aquí
+    al arrancar para que todas las tools operen sobre el directorio correcto.
+    """
     global _WORK_DIR, _ROOT_DIR
     _WORK_DIR = str(Path(work_dir).resolve())
     _ROOT_DIR = str(Path(root_dir).resolve()) if root_dir else _WORK_DIR
@@ -101,10 +105,12 @@ def sync_work_dir(work_dir: str, root_dir: Optional[str] = None) -> None:
 
 
 def get_work_dir() -> str:
+    """Devuelve el directorio de trabajo efectivo del runtime compartido."""
     return _WORK_DIR
 
 
 def get_root_dir() -> str:
+    """Devuelve la raíz de seguridad actual del runtime compartido."""
     return _ROOT_DIR
 
 
@@ -212,6 +218,7 @@ def _render_inline(text: str) -> Text:
 
 
 def print_tool_call(name: str, args: dict) -> None:
+    """Renderiza la invocación de tool en formato compacto de TUI."""
     t = Text()
     if name in _TOOL_LABELS:
         label, key = _TOOL_LABELS[name]
@@ -232,6 +239,7 @@ def print_tool_call(name: str, args: dict) -> None:
 
 
 def _print_diff(result: dict) -> None:
+    """Muestra un diff resumido usando colores y contexto mínimo."""
     la = result.get("added", 0)
     lr = result.get("removed", 0)
     s = Text()
@@ -263,6 +271,11 @@ def _print_diff(result: dict) -> None:
 
 
 def print_tool_result(result: dict) -> None:
+    """Normaliza la salida visual de todas las tools.
+
+    El objetivo es que el usuario vea siempre el mismo patrón de feedback
+    aunque la tool devuelva estructuras distintas.
+    """
     t = Text()
     if "error" in result:
         t.append("  ✗ ", style=C_ERR)
