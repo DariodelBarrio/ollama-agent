@@ -7,6 +7,7 @@ set OLLAMA_KV_CACHE_TYPE=q8_0
 title Ollama Agent - Hybrid Local Coder
 cls
 call "%~dp0find-python.bat" || goto :end
+call "%~dp0check-local-backend.bat" || goto :end
 %OLLAMA_AGENT_PYTHON% "%~dp0..\agent.py" --model qwen2.5-coder:14b --dir "%CD%" --tag LOCAL --ctx 8192 --backend auto
 :end
 pause
