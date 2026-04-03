@@ -43,6 +43,8 @@ spawns the process, forwards input, and renders output.
 
 Both variants expose:
 
+- GPU profile (`custom`, `5060`, `5070`, `5080`, `5090`)
+- GPU recommendation level (`safe`, `balanced`, `max`)
 - model
 - work directory
 - tag
@@ -104,6 +106,7 @@ Open the model screen from:
 Current controls:
 
 - `r`: refresh installed models
+- `g`: pull the recommended model for the selected GPU profile
 - `Enter`: set selected installed model as the active profile model
 - `p`: type a model name to pull, then `Enter` to start download
 - `d`: delete the selected installed model
@@ -129,6 +132,7 @@ inside one terminal UI.
 
 Current session controls:
 
+- `F4`: apply the selected GPU recommendation to `model` and `ctx`
 - `F5`: launch
 - `F2`: save current profile
 - `i`: start editing a line of input for the running agent
@@ -155,6 +159,14 @@ Model-management limits:
 - generic OpenAI-compatible backends may work for inference but not for model
   listing, pull, or delete
 - the launcher reports that limitation directly instead of faking support
+
+GPU recommendation limits:
+
+- GPU selection is a manual profile choice, not automatic hardware detection
+- recommendations depend on both the selected GPU and the selected level: `safe`, `balanced`, or `max`
+- recommendations only apply suggested defaults for `model` and `ctx`
+- model installation can use that same recommendation as a pull target
+- larger recommendations for `5080` and `5090` are intended for users with more VRAM headroom, but they are not guarantees
 
 ## Environment Variables
 

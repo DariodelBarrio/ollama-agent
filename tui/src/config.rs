@@ -30,6 +30,8 @@ impl Variant {
 pub struct Profile {
     pub name: String,
     pub variant: Variant,
+    pub gpu_profile: String,
+    pub gpu_preset: String,
     pub model: String,
     pub work_dir: String,
     pub tag: String,
@@ -52,6 +54,8 @@ impl Default for Profile {
         Self {
             name: "default".into(),
             variant: Variant::Local,
+            gpu_profile: "custom".into(),
+            gpu_preset: "safe".into(),
             model: "qwen2.5-coder:14b".into(),
             work_dir: ".".into(),
             tag: "AGENTE".into(),

@@ -62,6 +62,8 @@ pub const MENU_QUIT: usize = 4;
 pub const MENU_LEN: usize = 5;
 
 const MAX_MODEL_LOGS: usize = 24;
+const GPU_OPTIONS: [&str; 5] = ["custom", "5060", "5070", "5080", "5090"];
+const GPU_PRESET_OPTIONS: [&str; 3] = ["safe", "balanced", "max"];
 
 pub struct App {
     pub screen: Screen,
@@ -126,6 +128,8 @@ impl App {
         let p = &self.profile;
         let mut f = vec![
             Field::text("Perfil", &p.name),
+            Field::select("GPU", &p.gpu_profile, GPU_OPTIONS.to_vec()),
+            Field::select("GPU preset", &p.gpu_preset, GPU_PRESET_OPTIONS.to_vec()),
             Field::text("Modelo", &p.model),
             Field::path("Directorio", &p.work_dir),
             Field::text("Tag", &p.tag),
@@ -154,6 +158,8 @@ impl App {
         for f in &self.fields {
             match f.label {
                 "Perfil" => self.profile.name = f.value.clone(),
+                "GPU" => self.profile.gpu_profile = f.value.clone(),
+                "GPU preset" => self.profile.gpu_preset = f.value.clone(),
                 "Modelo" => self.profile.model = f.value.clone(),
                 "Directorio" => self.profile.work_dir = f.value.clone(),
                 "Tag" => self.profile.tag = f.value.clone(),
@@ -446,6 +452,7 @@ impl App {
                 }
             }
             KeyCode::F(5) => self.launch_session(),
+            KeyCode::F(4) => self.apply_gpu_recommendation(),
             KeyCode::F(3) => self.open_models_screen(),
             KeyCode::Char('l') if mods.contains(KeyModifiers::CONTROL) => self.launch_session(),
             KeyCode::F(2) => self.save_profile(),
@@ -486,6 +493,7 @@ impl App {
             }
             KeyCode::Enter => self.use_selected_model(),
             KeyCode::Char('r') => self.refresh_models(),
+            KeyCode::Char('g') => self.pull_gpu_recommendation(),
             KeyCode::Char('p') => {
                 self.model_input_editing = true;
                 if self.model_input_buffer.trim().is_empty() {
@@ -607,6 +615,17 @@ impl App {
         }
     }
 
+    fn pull_gpu_recommendation(&mut self) {
+        self.sync_profile();
+        let rec = gpu_recommendation(&self.profile.gpu_profile, &self.profile.gpu_preset, &self.profile.variant);
+        if rec.label == "custom" || rec.model.is_empty() {
+            self.set_status("Selecciona una GPU concreta para instalar un modelo recomendado.".into(), true);
+            return;
+        }
+        self.model_input_buffer = rec.model.into();
+        self.pull_model();
+    }
+
     fn delete_model(&mut self) {
         if self.model_task_running {
             self.set_status("Ya hay una operacion de modelos en curso.".into(), true);
@@ -645,6 +664,127 @@ impl App {
             self.model_logs.remove(0);
         }
         self.model_logs.push(line);
+    }
+
+    pub fn gpu_recommendation_summary(&self) -> String {
+        let rec = gpu_recommendation(&self.profile.gpu_profile, &self.profile.gpu_preset, &self.profile.variant);
+        if rec.label == "custom" {
+            "gpu: custom".into()
+        } else {
+            format!(
+                "gpu: RTX {} [{}] -> {} / ctx {}",
+                rec.label, rec.preset, rec.model, rec.ctx
+            )
+        }
+    }
+
+    fn apply_gpu_recommendation(&mut self) {
+        self.sync_profile();
+        let rec = gpu_recommendation(&self.profile.gpu_profile, &self.profile.gpu_preset, &self.profile.variant);
+        if rec.label == "custom" {
+            self.set_status("Perfil GPU en custom: no se aplican cambios automaticos.".into(), false);
+            return;
+        }
+        self.profile.model = rec.model.into();
+        self.profile.ctx = rec.ctx;
+        self.rebuild_fields();
+        self.set_status(
+            format!(
+                "Preset RTX {} [{}] aplicado: modelo '{}' y ctx {}.",
+                rec.label, rec.preset, rec.model, rec.ctx
+            ),
+            false,
+        );
+    }
+}
+
+struct GpuRecommendation {
+    label: &'static str,
+    preset: &'static str,
+    model: &'static str,
+    ctx: u32,
+}
+
+fn gpu_recommendation(gpu_profile: &str, gpu_preset: &str, variant: &Variant) -> GpuRecommendation {
+    match (gpu_profile, gpu_preset, variant) {
+        ("5060", "safe", Variant::Local) | ("5060", "safe", Variant::Hybrid) => GpuRecommendation {
+            label: "5060",
+            preset: "safe",
+            model: "qwen2.5-coder:7b",
+            ctx: 4096,
+        },
+        ("5060", "balanced", Variant::Local) | ("5060", "balanced", Variant::Hybrid) => GpuRecommendation {
+            label: "5060",
+            preset: "balanced",
+            model: "qwen2.5-coder:7b",
+            ctx: 8192,
+        },
+        ("5060", "max", Variant::Local) | ("5060", "max", Variant::Hybrid) => GpuRecommendation {
+            label: "5060",
+            preset: "max",
+            model: "qwen2.5-coder:14b",
+            ctx: 4096,
+        },
+        ("5070", "safe", Variant::Local) | ("5070", "safe", Variant::Hybrid) => GpuRecommendation {
+            label: "5070",
+            preset: "safe",
+            model: "qwen2.5-coder:7b",
+            ctx: 8192,
+        },
+        ("5070", "balanced", Variant::Local) | ("5070", "balanced", Variant::Hybrid) => GpuRecommendation {
+            label: "5070",
+            preset: "balanced",
+            model: "qwen2.5-coder:14b",
+            ctx: 8192,
+        },
+        ("5070", "max", Variant::Local) | ("5070", "max", Variant::Hybrid) => GpuRecommendation {
+            label: "5070",
+            preset: "max",
+            model: "qwen2.5-coder:14b",
+            ctx: 12288,
+        },
+        ("5080", "safe", Variant::Local) | ("5080", "safe", Variant::Hybrid) => GpuRecommendation {
+            label: "5080",
+            preset: "safe",
+            model: "qwen2.5-coder:14b",
+            ctx: 8192,
+        },
+        ("5080", "balanced", Variant::Local) | ("5080", "balanced", Variant::Hybrid) => GpuRecommendation {
+            label: "5080",
+            preset: "balanced",
+            model: "qwen2.5-coder:32b",
+            ctx: 8192,
+        },
+        ("5080", "max", Variant::Local) | ("5080", "max", Variant::Hybrid) => GpuRecommendation {
+            label: "5080",
+            preset: "max",
+            model: "qwen2.5-coder:32b",
+            ctx: 16384,
+        },
+        ("5090", "safe", Variant::Local) | ("5090", "safe", Variant::Hybrid) => GpuRecommendation {
+            label: "5090",
+            preset: "safe",
+            model: "qwen2.5-coder:14b",
+            ctx: 16384,
+        },
+        ("5090", "balanced", Variant::Local) | ("5090", "balanced", Variant::Hybrid) => GpuRecommendation {
+            label: "5090",
+            preset: "balanced",
+            model: "qwen2.5-coder:32b",
+            ctx: 16384,
+        },
+        ("5090", "max", Variant::Local) | ("5090", "max", Variant::Hybrid) => GpuRecommendation {
+            label: "5090",
+            preset: "max",
+            model: "qwen2.5-coder:32b",
+            ctx: 32768,
+        },
+        _ => GpuRecommendation {
+            label: "custom",
+            preset: "custom",
+            model: "",
+            ctx: 0,
+        },
     }
 }
 

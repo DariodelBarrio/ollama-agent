@@ -78,8 +78,8 @@ fn render_statusbar(app: &App, frame: &mut Frame, area: Rect) {
     } else {
         let hint = match app.screen {
             Screen::MainMenu => "j/k navegar  Enter abrir  q salir",
-            Screen::Configure => "Tab campo  Enter editar  F3 modelos  F5 lanzar  F2 guardar  Esc volver",
-            Screen::Models => "j/k navegar  Enter usar  p pull  d borrar  r refrescar  Esc volver",
+            Screen::Configure => "Tab campo  Enter editar  F3 modelos  F4 aplicar preset GPU  F5 lanzar  F2 guardar  Esc volver",
+            Screen::Models => "j/k navegar  Enter usar  g recomendado  p pull  d borrar  r refrescar  Esc volver",
             Screen::Profiles => "j/k navegar  Enter cargar  d borrar  Esc volver",
             Screen::Session => "i entrada  Enter enviar  F6 detener  Esc volver  j/k scroll",
         };
@@ -190,12 +190,13 @@ fn render_configure(app: &App, frame: &mut Frame, area: Rect) {
 
     let command = crate::agent::command_preview(&app.profile, &app.repo_root);
     let detail = match app.profile.variant {
-        Variant::Local => format!("workdir: {}", app.resolve_work_dir()),
+        Variant::Local => format!("workdir: {}  {}", app.resolve_work_dir(), app.gpu_recommendation_summary()),
         Variant::Hybrid => format!(
-            "backend: {}  critic: {}  sandbox: {}",
+            "backend: {}  critic: {}  sandbox: {}  {}",
             app.profile.backend,
             if app.profile.critic { "on" } else { "off" },
-            if app.profile.sandbox.is_empty() { "off" } else { &app.profile.sandbox }
+            if app.profile.sandbox.is_empty() { "off" } else { &app.profile.sandbox },
+            app.gpu_recommendation_summary(),
         ),
     };
     let preview = Paragraph::new(format!("{detail}\ncmd: {command}"))
@@ -226,8 +227,10 @@ fn render_models(app: &App, frame: &mut Frame, area: Rect) {
         Err(err) => err,
     };
     let meta = Paragraph::new(format!(
-        "endpoint: {endpoint}\nperfil: {} · modelo activo: {}\nnota: requiere backend local compatible con la API nativa de Ollama",
-        app.profile.name, app.profile.model
+        "endpoint: {endpoint}\nperfil: {} · modelo activo: {}\n{}\nnota: requiere backend local compatible con la API nativa de Ollama",
+        app.profile.name,
+        app.profile.model,
+        app.gpu_recommendation_summary(),
     ))
     .wrap(Wrap { trim: false })
     .block(Block::default().title(" Backend ").borders(Borders::ALL).border_style(Style::default().fg(C_BORDER)));
@@ -288,7 +291,7 @@ fn render_models(app: &App, frame: &mut Frame, area: Rect) {
     let input_text = if app.model_input_editing {
         format!("{}_", app.model_input_buffer)
     } else if app.model_input_buffer.is_empty() {
-        "Pulsa p para descargar un modelo; Enter usa el seleccionado en el perfil.".into()
+        "Pulsa g para descargar el recomendado por GPU, o p para escribir uno manualmente.".into()
     } else {
         app.model_input_buffer.clone()
     };
