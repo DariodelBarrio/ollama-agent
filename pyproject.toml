@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ollama-agent"
+version = "0.1.0"
+description = "Coding agent for OpenAI-compatible local and hybrid backends."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [
+  { name = "Dario Del Barrio" }
+]
+keywords = ["agent", "ollama", "openai-compatible", "coding", "llm"]
+dependencies = [
+  "ollama",
+  "openai",
+  "rich",
+  "pydantic",
+  "jinja2",
+  "duckduckgo-search",
+  "requests",
+  "beautifulsoup4",
+  "prompt_toolkit",
+  "fpdf2",
+]
+
+[project.optional-dependencies]
+hybrid = [
+  "sglang",
+  "vllm",
+]
+
+[project.urls]
+Homepage = "https://github.com/DariodelBarrio/ollama-agent"
+Repository = "https://github.com/DariodelBarrio/ollama-agent"
+Issues = "https://github.com/DariodelBarrio/ollama-agent/issues"
+
+[tool.pytest.ini_options]
+pythonpath = [".", "src"]

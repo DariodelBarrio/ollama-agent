@@ -42,6 +42,26 @@ Los prompts base viven en `prompts/` y se renderizan en tiempo de ejecucion.
 - Memoria persistente SQLite.
 - Slash commands de sesion.
 
+## Architecture
+
+```mermaid
+flowchart TD
+    U[Usuario] --> CLI[src/agent.py o src/hybrid/agent.py]
+    CLI --> P[agent_prompting.py]
+    CLI --> B[src/base_agent.py]
+    B --> T[common_tools.py]
+    T --> R[common_runtime.py]
+    R --> FS[Filesystem dentro del workspace]
+    R --> SH[Shell local o sandbox Docker]
+    T --> WEB[Busqueda web y fetch URL]
+    CLI --> LLM[Backend OpenAI-compatible]
+    CLI --> H[Router y memoria en src/hybrid/agent.py]
+    H --> GROQ[Groq]
+    H --> MEM[SQLite FTS5]
+```
+
+El flujo básico es: el usuario lanza una tarea, el agente construye el prompt, el modelo decide si necesita tools, `common_tools.py` ejecuta acciones dentro del workspace y el agente devuelve resultado o sigue iterando hasta cerrar la tarea.
+
 ## Instalacion
 
 ```bash
@@ -94,16 +114,83 @@ Launchers Unix equivalentes:
 - `src/hybrid/unix/groq-cloud.sh`
 - `src/hybrid/unix/install-deps.sh`
 
+## Ejemplos reales
+
+### 1. Corregir un import roto
+
+Input:
+
+```text
+Arregla el import roto en src/agent.py y verifica qué archivo lo define.
+```
+
+Tools:
+
+```text
+grep("build_system_prompt", path=".")
+read_file("src/agent.py")
+edit_file("src/agent.py", ...)
+```
+
+Resultado:
+
+```text
+El agente localiza la definición real, corrige el import y devuelve un diff resumido.
+```
+
+### 2. Revisar seguridad del runtime
+
+Input:
+
+```text
+Revisa si run_command bloquea comandos destructivos y dime dónde está la política.
+```
+
+Tools:
+
+```text
+read_file("common_runtime.py")
+grep("BLOCKED_COMMAND_PATTERNS", path=".")
+read_file("tests/test_agent_safety.py")
+```
+
+Resultado:
+
+```text
+El agente identifica la blocklist, comprueba los tests de seguridad y resume qué queda cubierto y qué no.
+```
+
+### 3. Documentar una parte del sistema
+
+Input:
+
+```text
+Explícame cómo decide el backend en el modo híbrido.
+```
+
+Tools:
+
+```text
+read_file("src/hybrid/agent.py")
+grep("class SmartRouter", path="src/hybrid", extension=".py")
+```
+
+Resultado:
+
+```text
+El agente resume la heurística del router, cuándo fuerza Groq y cómo usa el umbral de contexto.
+```
+
 ## Demos
 
-- Flujo paso a paso: [docs/demo-flow.md](/C:/Users/dapio/Documents/ollama/docs/demo-flow.md)
-- Captura actual de la UI: [docs/screenshot.png](/C:/Users/dapio/Documents/ollama/docs/screenshot.png)
+- Flujo paso a paso: [docs/demo-flow.md](docs/demo-flow.md)
+- Captura actual de la UI: [docs/screenshot.png](docs/screenshot.png)
 
 El repo ya documenta el flujo `prompt -> accion -> diff -> resultado`. No he añadido un GIF nuevo al repo porque no habia una grabacion reproducible en esta maquina.
 
 ## Benchmark
 
-- Benchmark y metodologia: [docs/benchmark.md](/C:/Users/dapio/Documents/ollama/docs/benchmark.md)
+- Benchmark y metodologia: [docs/benchmark.md](docs/benchmark.md)
 
 El benchmark esta definido sobre 3 tareas y con formato reproducible. No se han inventado numeros donde no habia herramientas instaladas o ejecucion reproducible.
 
@@ -118,7 +205,7 @@ Resumen:
 - `run_command()` filtra una blocklist de comandos destructivos y pipelines peligrosos.
 - Esto no es un sandbox de SO ni un contenedor. Es una capa de guardas de aplicacion.
 
-Detalle completo: [docs/security.md](/C:/Users/dapio/Documents/ollama/docs/security.md)
+Detalle completo: [docs/security.md](docs/security.md)
 
 ## Limitaciones actuales
 
