@@ -145,6 +145,20 @@ Canonical launchers:
 `IA/MEGA/` remains in the repository only as a compatibility layer for older
 Windows launch flows. It is not the canonical location for active code.
 
+### Launch Paths
+
+The repository intentionally keeps two separate launch paths on Windows:
+
+- `tui\target\release\oat.exe`: compiled terminal-first launcher and manager
+- `IA\MEGA\*.bat` and `src\hybrid\windows\*.bat`: legacy script launchers kept for compatibility
+
+Use `oat.exe` when you want profiles, model management, live session output,
+and a managed terminal UI. Use the `.bat` launchers when you want the older
+direct-script flow without the TUI.
+
+The TUI-specific compatibility changes do not replace or remove the legacy
+`.bat` entry points.
+
 ## Architecture
 
 At a high level:

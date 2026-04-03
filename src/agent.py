@@ -7,6 +7,7 @@ import logging
 import sys
 import re
 import argparse
+import os
 import time
 import inspect
 from pathlib import Path
@@ -69,8 +70,18 @@ LOGO_LINES = [
     f"[{C_LOGO}]▀████▀[/]",
 ]
 
+SIMPLE_INPUT = os.getenv("OLLAMA_AGENT_SIMPLE_INPUT", "").strip().lower() in {"1", "true", "yes"}
+
 
 def print_header(model: str, work_dir: str, tag: str, num_ctx: int, temperature: float):
+    if SIMPLE_INPUT:
+        console.print()
+        console.print(f"[bold]{tag}[/]  {model}")
+        console.print(f"[{C_DIM}]ctx:{num_ctx}  temp:{temperature}  {work_dir}[/]")
+        console.print(f"[{C_DIM}]Escribe y pulsa Enter. 'salir' termina. 'limpiar' reinicia.[/]")
+        console.print(f"[{C_BORDER}]" + ("-" * 72) + "[/]")
+        console.print()
+        return
     console.print()
     logo_text = Text.from_markup("\n".join(LOGO_LINES))
     info = Text()
@@ -90,6 +101,11 @@ def print_header(model: str, work_dir: str, tag: str, num_ctx: int, temperature:
 
 
 def get_input(color: str = C_PROMPT) -> str:
+    if SIMPLE_INPUT:
+        try:
+            return input().strip()
+        except (KeyboardInterrupt, EOFError):
+            return "salir"
     console.print()
     try:
         console.print(f"[{color}]>[/] ", end="")

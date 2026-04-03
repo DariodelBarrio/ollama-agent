@@ -77,8 +77,16 @@ def make_logger(name: str, path: Path) -> logging.Logger:
     logger.setLevel(logging.DEBUG)
     logger.propagate = False
     if not logger.handlers:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        handler = logging.FileHandler(path, encoding="utf-8")
+        target = path
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            handler = logging.FileHandler(target, encoding="utf-8")
+        except OSError:
+            fallback_dir = _REPO_ROOT / ".logs"
+            fallback_dir.mkdir(parents=True, exist_ok=True)
+            safe_name = name.replace("\\", "_").replace("/", "_").replace(":", "_")
+            target = fallback_dir / f"{safe_name}.jsonl"
+            handler = logging.FileHandler(target, encoding="utf-8")
         handler.setFormatter(_JsonFmt())
         logger.addHandler(handler)
     return logger

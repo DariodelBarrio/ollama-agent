@@ -153,6 +153,7 @@ pub fn build_command(profile: &Profile, repo_root: &Path) -> Command {
     match profile.variant {
         Variant::Local => {
             cmd.arg("--api-base").arg(&profile.api_base);
+            cmd.env("OLLAMA_AGENT_SIMPLE_INPUT", "1");
         }
         Variant::Hybrid => {
             cmd.arg("--backend").arg(&profile.backend);

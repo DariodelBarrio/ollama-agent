@@ -25,7 +25,8 @@ The current TUI is intentionally small but useful:
 - stop the child process from the launcher
 
 This keeps the project terminal-first without making `.bat` files the primary
-interface anymore.
+interface anymore, while still keeping the legacy `.bat` launchers as a
+separate compatibility path.
 
 ## Architecture
 
@@ -79,6 +80,11 @@ Binary output:
 
 - Linux/macOS: `tui/target/release/oat`
 - Windows: `tui\target\release\oat.exe`
+
+Legacy Windows launchers remain separate:
+
+- `IA\MEGA\*.bat`
+- `src\hybrid\windows\*.bat`
 
 ## Usage
 
@@ -175,4 +181,4 @@ GPU recommendation limits:
 | `OLLAMA_AGENT_ROOT` | Repository path when `oat` starts outside the repo |
 | `GROQ_API_KEY` | Required for Hybrid runs that route to Groq |
 | `PYTHONUNBUFFERED` | Set automatically by `oat` for live output |
-| `OLLAMA_AGENT_SIMPLE_INPUT` | Set automatically by `oat` for managed Hybrid sessions |
+| `OLLAMA_AGENT_SIMPLE_INPUT` | Set automatically by `oat` for managed Local and Hybrid sessions |

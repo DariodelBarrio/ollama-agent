@@ -51,13 +51,17 @@ pub struct Profile {
 
 impl Default for Profile {
     fn default() -> Self {
+        let default_work_dir = dirs::document_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .to_string_lossy()
+            .to_string();
         Self {
             name: "default".into(),
             variant: Variant::Local,
             gpu_profile: "custom".into(),
             gpu_preset: "safe".into(),
             model: "qwen2.5-coder:14b".into(),
-            work_dir: ".".into(),
+            work_dir: default_work_dir,
             tag: "AGENTE".into(),
             ctx: 16384,
             temperature: 0.15,
