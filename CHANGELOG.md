@@ -8,15 +8,15 @@ The format is intentionally simple for now.
 
 ### Added
 
-- Windows launcher helpers that resolve `python` and `ollama` more reliably on local machines
-- guided legacy launchers for starting Ollama and pulling lighter local coder models
-- lighter legacy local launcher variants for `qwen2.5-coder:7b` and `qwen2.5-coder:3b`
+- direct-input session flow in the TUI, without a separate "press `i`" mode
+- TUI-side UTF-8 process environment handling for managed Python sessions on Windows
+- TUI render caching and output-windowing to reduce redraw and string rebuild cost
 
 ### Changed
 
 - Local and Hybrid agents now recover tool calls when smaller models print them as JSON-like text inside Markdown fences
 - Main README now links to the standalone Windows `.bat` and TUI split repositories
-- Legacy launchers fail earlier with clearer backend and Python resolution errors instead of opaque connection failures
+- Main repository no longer ships the legacy Windows `.bat` compatibility layer
 
 ## [0.1.0] - 2026-04-03
 
@@ -36,7 +36,7 @@ Initial public release.
 ### Changed
 
 - Documentation now treats `src/agent.py`, `src/hybrid/agent.py`, and `tui/` as canonical entry points
-- Legacy `IA/MEGA/` and `--mega` naming remain for compatibility, not as the preferred interface
+- `--mega` naming remains only as a compatibility alias; `Hybrid` is the canonical name
 - Security guardrails now block additional clearly destructive command patterns
 
 ### Known Limits

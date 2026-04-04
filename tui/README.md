@@ -24,9 +24,9 @@ The current TUI is intentionally small but useful:
 - send line-based input to the running agent
 - stop the child process from the launcher
 
-This keeps the project terminal-first without making `.bat` files the primary
-interface anymore, while still keeping the legacy `.bat` launchers as a
-separate compatibility path.
+This keeps the project terminal-first without turning the TUI into a rewrite
+of the agent. The legacy Windows `.bat` launchers live in the separate
+compatibility repository.
 
 ## Architecture
 
@@ -81,10 +81,8 @@ Binary output:
 - Linux/macOS: `tui/target/release/oat`
 - Windows: `tui\target\release\oat.exe`
 
-Legacy Windows launchers remain separate:
-
-- `IA\MEGA\*.bat`
-- `src\hybrid\windows\*.bat`
+Legacy Windows launchers are not part of this repository. Use the separate
+Windows compatibility repository if you want the `.bat` workflow.
 
 ## Usage
 

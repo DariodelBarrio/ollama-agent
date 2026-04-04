@@ -141,36 +141,27 @@ In Hybrid:
 - `--groq-model` is the explicit Groq fallback/override model.
 - `--local-url` is the local OpenAI-compatible endpoint.
 
-Canonical launch paths in this combined repo:
+Canonical launch paths in this repo:
 
 - `tui/` (`oat`) for interactive terminal-first launch and session management
 - `src/agent.py`
 - `src/hybrid/agent.py`
-- `src/hybrid/windows/*.bat` and `IA/MEGA/*.bat` for Windows compatibility and quick-launch flows
 - `src/hybrid/unix/*.sh` for Unix shell launchers
-
-`IA/MEGA/` remains in the repository only as a compatibility layer for older
-Windows launch flows. It is not the canonical location for active code.
 
 ### Launch Paths
 
-The project intentionally keeps two separate launch paths on Windows:
+The project keeps one canonical Windows launch path here:
 
 - `tui\target\release\oat.exe`: compiled terminal-first launcher and manager
-- `IA\MEGA\*.bat` and `src\hybrid\windows\*.bat`: legacy script launchers kept for compatibility
 
-Use `oat.exe` when you want profiles, model management, live session output,
-and a managed terminal UI. Use the `.bat` launchers when you want the older
-direct-script flow, a quick Windows shortcut, or a compatibility path.
+If you want the legacy Windows `.bat` workflow, use the standalone split
+repository instead:
 
-The TUI-specific compatibility changes do not replace or remove the legacy
-`.bat` entry points.
+- `ollama-agent-windows-bat`
 
-If you want those paths as standalone repositories instead of the combined
-repo, use:
+If you want the launcher split as a standalone repository, use:
 
-- `ollama-agent-windows-bat` for the Windows `.bat` workflow
-- `ollama-agent-tui` for the compiled terminal-first launcher workflow
+- `ollama-agent-tui`
 
 ## Architecture
 
@@ -194,7 +185,7 @@ Launch boundary:
 
 - Python remains the execution engine
 - Rust TUI is a launcher and session manager around the Python core
-- `.bat` launchers stay thin wrappers around the Python Hybrid entry path
+- legacy `.bat` launchers live in the separate Windows compatibility repo
 
 ## Security Model
 
@@ -246,7 +237,6 @@ What `v0.1.0` means:
 - Benchmark documentation exists, but there are no published benchmark results yet.
 - The project is optimized for terminal workflows, not editor integration.
 - Hybrid memory is local to the machine and not synchronized across environments.
-- Backward-compatibility shims still exist for legacy launch paths.
 - `requirements-mega.txt` and `--mega` are legacy aliases; `requirements-hybrid.txt` and `--hybrid` are canonical.
 
 ## Documentation
@@ -265,7 +255,7 @@ What `v0.1.0` means:
 Short-term priorities:
 
 - tighten documentation and repository consistency
-- stabilize the canonical entry points and legacy compatibility story
+- stabilize the canonical entry points and split-repo boundaries
 - improve test coverage around shared runtime behavior
 - publish reproducible benchmark runs when the methodology is stable
 
@@ -297,7 +287,6 @@ What CI currently proves:
 What CI does not fully prove:
 
 - end-to-end Hybrid execution against real Groq or Ollama services
-- interactive `.bat` launcher behavior
 - model quality or tool reliability for any specific local model
 
 ## Repository Layout
@@ -319,7 +308,7 @@ ollama-agent/
 |-- prompts/
 |-- docs/
 |-- tests/
-`-- IA/MEGA/    # legacy compatibility only
+`-- tui/
 ```
 
 ## License
