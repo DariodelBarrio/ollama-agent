@@ -21,6 +21,7 @@ pub struct InstalledModel {
 #[derive(Debug)]
 pub enum ModelEvent {
     Status(String),
+    Progress(String),
     Listed(Result<Vec<InstalledModel>, String>),
     Finished(Result<String, String>),
 }
@@ -161,16 +162,20 @@ pub fn pull_model(base: &str, model: &str, tx: &Sender<ModelEvent>) -> Result<St
         if let Some(error) = update.error {
             return Err(format!("Error descargando '{model}': {error}"));
         }
-        let status = render_pull_status(&update);
-        if !status.is_empty() {
+        if let Some((status, is_progress)) = render_pull_status(&update) {
             last_status = status.clone();
-            let _ = tx.send(ModelEvent::Status(status));
+            let event = if is_progress {
+                ModelEvent::Progress(status)
+            } else {
+                ModelEvent::Status(status)
+            };
+            let _ = tx.send(event);
         }
     }
     Ok(format!("Modelo '{model}' listo. {last_status}"))
 }
 
-fn render_pull_status(update: &PullLine) -> String {
+fn render_pull_status(update: &PullLine) -> Option<(String, bool)> {
     let mut status = update.status.clone().unwrap_or_default();
     if let (Some(completed), Some(total)) = (update.completed, update.total) {
         if total > 0 {
@@ -178,10 +183,17 @@ fn render_pull_status(update: &PullLine) -> String {
             if status.is_empty() {
                 status = "descargando".into();
             }
-            return format!("{status} {pct:.0}% ({}/{})", human_bytes(completed), human_bytes(total));
+            return Some((
+                format!("{status} {pct:.0}% ({}/{})", human_bytes(completed), human_bytes(total)),
+                true,
+            ));
         }
     }
-    status
+    if status.is_empty() {
+        None
+    } else {
+        Some((status, false))
+    }
 }
 
 fn human_bytes(bytes: u64) -> String {

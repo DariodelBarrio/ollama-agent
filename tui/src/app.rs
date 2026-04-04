@@ -4,7 +4,11 @@ use crate::agent::AgentSession;
 use crate::config::{Profile, ProfileStore, Variant};
 use crate::models::{native_api_base, InstalledModel, ModelEvent, ModelTask};
 use ratatui::crossterm::event::{KeyCode, KeyModifiers};
-use std::path::{Path, PathBuf};
+use std::{
+    collections::VecDeque,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Screen {
@@ -77,19 +81,24 @@ pub struct App {
     pub should_quit: bool,
     pub repo_root: PathBuf,
     pub session: Option<AgentSession>,
-    pub last_session_output: String,
+    pub last_session_lines: VecDeque<String>,
     pub input_buffer: String,
     pub input_editing: bool,
     pub session_scroll: u16,
+    pub session_follow_output: bool,
     pub models: Vec<InstalledModel>,
     pub model_idx: usize,
     pub model_logs: Vec<String>,
-    pub model_log_output: String,
+    pub model_progress: Option<String>,
     pub model_input_buffer: String,
     pub model_input_editing: bool,
     pub model_task_running: bool,
     model_task: Option<ModelTask>,
     pending_model_refresh: bool,
+    pub configure_preview_command: String,
+    pub configure_preview_detail: String,
+    pub session_command_preview: String,
+    pub session_work_dir_preview: String,
 }
 
 impl App {
@@ -108,19 +117,24 @@ impl App {
             should_quit: false,
             repo_root,
             session: None,
-            last_session_output: String::new(),
+            last_session_lines: VecDeque::new(),
             input_buffer: String::new(),
             input_editing: false,
             session_scroll: 0,
+            session_follow_output: true,
             models: vec![],
             model_idx: 0,
             model_logs: vec![],
-            model_log_output: String::new(),
+            model_progress: None,
             model_input_buffer: String::new(),
             model_input_editing: false,
             model_task_running: false,
             model_task: None,
             pending_model_refresh: false,
+            configure_preview_command: String::new(),
+            configure_preview_detail: String::new(),
+            session_command_preview: String::new(),
+            session_work_dir_preview: String::new(),
         };
         app.rebuild_fields();
         app
@@ -154,6 +168,7 @@ impl App {
         }
         self.fields = f;
         self.field_idx = self.field_idx.min(self.fields.len().saturating_sub(1));
+        self.refresh_configure_preview();
     }
 
     pub fn sync_profile(&mut self) {
@@ -182,6 +197,7 @@ impl App {
                 _ => {}
             }
         }
+        self.refresh_configure_preview();
     }
 
     pub fn save_profile(&mut self) {
@@ -199,17 +215,20 @@ impl App {
             self.set_status("El modelo no puede estar vacio.".into(), true);
             return;
         }
+        self.session_command_preview = crate::agent::command_preview(&self.profile, &self.repo_root);
+        self.session_work_dir_preview = resolve_path_for_display(&self.profile.work_dir, &self.repo_root);
         match AgentSession::spawn(&self.profile, &self.repo_root) {
             Ok(mut session) => {
                 session
                     .lines
-                    .push_back(format!("[launcher] Sesion iniciada: {} · {}", self.profile.variant.label(), self.profile.model));
-                self.last_session_output.clear();
+                    .push_back(format!("[launcher] Sesion iniciada: {} Â· {}", self.profile.variant.label(), self.profile.model));
+                self.last_session_lines.clear();
                 self.session = Some(session);
                 self.screen = Screen::Session;
                 self.input_buffer.clear();
                 self.input_editing = false;
                 self.session_scroll = 0;
+                self.session_follow_output = true;
                 self.set_status("Agente en ejecucion.".into(), false);
             }
             Err(err) => self.set_status(format!("No se pudo lanzar el agente: {err}"), true),
@@ -218,7 +237,7 @@ impl App {
 
     pub fn poll_session(&mut self) -> bool {
         let mut changed = false;
-        let mut finished_output: Option<String> = None;
+        let mut finished_lines: Option<VecDeque<String>> = None;
         let mut status_update: Option<(String, bool)> = None;
 
         if let Some(session) = self.session.as_mut() {
@@ -238,12 +257,17 @@ impl App {
                         status_update = Some(("Fallo al gestionar el proceso del agente.".into(), true));
                     }
                 }
-                finished_output = Some(session.rendered_output().to_string());
+                finished_lines = Some(session.lines.clone());
+            } else if !session.lines.is_empty() {
+                changed = session.last_event_changed();
             }
         }
 
-        if let Some(output) = finished_output {
-            self.last_session_output = output;
+        if changed && self.session_follow_output {
+            self.session_scroll = 0;
+        }
+        if let Some(lines) = finished_lines {
+            self.last_session_lines = lines;
             self.session = None;
             changed = true;
         }
@@ -260,12 +284,18 @@ impl App {
             changed = true;
             match event {
                 ModelEvent::Status(msg) => {
+                    self.model_progress = None;
                     self.push_model_log(msg.clone());
+                    self.set_status(msg, false);
+                }
+                ModelEvent::Progress(msg) => {
+                    self.model_progress = Some(msg.clone());
                     self.set_status(msg, false);
                 }
                 ModelEvent::Listed(result) => {
                     self.model_task = None;
                     self.model_task_running = false;
+                    self.model_progress = None;
                     match result {
                         Ok(models) => {
                             let names: Vec<String> = models.iter().map(|model| model.name.clone()).collect();
@@ -287,6 +317,7 @@ impl App {
                 ModelEvent::Finished(result) => {
                     self.model_task = None;
                     self.model_task_running = false;
+                    self.model_progress = None;
                     match result {
                         Ok(msg) => {
                             self.push_model_log(msg.clone());
@@ -340,16 +371,12 @@ impl App {
         self.status = Some((msg, is_err));
     }
 
-    pub fn session_log_text(&self) -> &str {
-        if let Some(session) = self.session.as_ref() {
-            session.rendered_output()
+    pub fn poll_timeout(&self) -> Duration {
+        if self.session.is_some() || self.model_task_running {
+            Duration::from_millis(25)
         } else {
-            &self.last_session_output
+            Duration::from_millis(120)
         }
-    }
-
-    pub fn resolve_work_dir(&self) -> String {
-        resolve_path_for_display(&self.profile.work_dir, &self.repo_root)
     }
 
     pub fn local_models_endpoint(&self) -> Result<String, String> {
@@ -358,6 +385,38 @@ impl App {
 
     pub fn selected_model(&self) -> Option<&InstalledModel> {
         self.models.get(self.model_idx)
+    }
+
+    pub fn session_window_text(&self, height: u16) -> String {
+        let window = height.max(1) as usize;
+        let lines = self.session_lines();
+        if lines.is_empty() {
+            return "[launcher] No hay salida todavia.".into();
+        }
+        let (start, len) = visible_window_bounds(lines.len(), window, self.session_scroll as usize);
+        lines.iter().skip(start).take(len).cloned().collect::<Vec<_>>().join("\n")
+    }
+
+    pub fn session_view_label(&self) -> String {
+        match (self.session.is_some(), self.session_follow_output, self.session_scroll) {
+            (true, true, _) => " Live Output · following ".into(),
+            (true, false, n) if n > 0 => format!(" Live Output · +{n} "),
+            (true, false, _) => " Live Output ".into(),
+            (false, _, _) => " Last Session ".into(),
+        }
+    }
+
+    pub fn model_window_text(&self, height: u16) -> String {
+        let mut combined: Vec<&str> = self.model_logs.iter().map(String::as_str).collect();
+        if let Some(progress) = self.model_progress.as_deref() {
+            combined.push(progress);
+        }
+        if combined.is_empty() {
+            return "Sin actividad todavia.".into();
+        }
+        let window = height.max(1) as usize;
+        let start = combined.len().saturating_sub(window);
+        combined.into_iter().skip(start).collect::<Vec<_>>().join("\n")
     }
 
     pub fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) {
@@ -417,6 +476,7 @@ impl App {
     }
 
     fn on_configure_editing(&mut self, code: KeyCode) {
+        let mut changed = false;
         match code {
             KeyCode::Enter | KeyCode::Esc => {
                 if let Some(f) = self.fields.get_mut(self.field_idx) {
@@ -425,7 +485,7 @@ impl App {
             }
             KeyCode::Backspace => {
                 if let Some(f) = self.fields.get_mut(self.field_idx) {
-                    f.value.pop();
+                    changed = f.value.pop().is_some();
                 }
             }
             KeyCode::Char(c) => {
@@ -437,10 +497,14 @@ impl App {
                     };
                     if allowed {
                         f.value.push(c);
+                        changed = true;
                     }
                 }
             }
             _ => {}
+        }
+        if changed {
+            self.refresh_configure_preview();
         }
     }
 
@@ -452,10 +516,14 @@ impl App {
             KeyCode::Enter | KeyCode::Char(' ') => {
                 if let Some(f) = self.fields.get_mut(self.field_idx) {
                     match f.kind.clone() {
-                        FieldKind::Bool => f.value = if f.value == "on" { "off".into() } else { "on".into() },
+                        FieldKind::Bool => {
+                            f.value = if f.value == "on" { "off".into() } else { "on".into() };
+                            self.refresh_configure_preview();
+                        }
                         FieldKind::Select(opts) => {
                             let current = opts.iter().position(|&o| o == f.value).unwrap_or(0);
                             f.value = opts[(current + 1) % opts.len()].to_string();
+                            self.refresh_configure_preview();
                         }
                         _ => f.editing = true,
                     }
@@ -548,6 +616,9 @@ impl App {
                             }
                             self.input_buffer.clear();
                             self.input_editing = false;
+                            if self.session_follow_output {
+                                self.session_scroll = 0;
+                            }
                         }
                         Err(err) => self.set_status(format!("No se pudo enviar entrada: {err}"), true),
                     }
@@ -566,12 +637,34 @@ impl App {
             KeyCode::Char('i') => self.input_editing = true,
             KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => self.stop_session(),
             KeyCode::F(6) => self.stop_session(),
-            KeyCode::Up | KeyCode::Char('k') => self.session_scroll = self.session_scroll.saturating_add(1),
-            KeyCode::Down | KeyCode::Char('j') => self.session_scroll = self.session_scroll.saturating_sub(1),
-            KeyCode::PageUp => self.session_scroll = self.session_scroll.saturating_add(10),
-            KeyCode::PageDown => self.session_scroll = self.session_scroll.saturating_sub(10),
-            KeyCode::Home => self.session_scroll = u16::MAX,
-            KeyCode::End => self.session_scroll = 0,
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.session_follow_output = false;
+                self.session_scroll = self.session_scroll.saturating_add(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.session_scroll = self.session_scroll.saturating_sub(1);
+                if self.session_scroll == 0 {
+                    self.session_follow_output = true;
+                }
+            }
+            KeyCode::PageUp => {
+                self.session_follow_output = false;
+                self.session_scroll = self.session_scroll.saturating_add(10);
+            }
+            KeyCode::PageDown => {
+                self.session_scroll = self.session_scroll.saturating_sub(10);
+                if self.session_scroll == 0 {
+                    self.session_follow_output = true;
+                }
+            }
+            KeyCode::Home => {
+                self.session_follow_output = false;
+                self.session_scroll = u16::MAX;
+            }
+            KeyCode::End => {
+                self.session_scroll = 0;
+                self.session_follow_output = true;
+            }
             KeyCode::Esc => self.screen = Screen::Configure,
             _ => {}
         }
@@ -595,6 +688,7 @@ impl App {
                 self.model_task = Some(task);
                 self.model_task_running = true;
                 self.pending_model_refresh = false;
+                self.model_progress = None;
                 self.push_model_log("Actualizando listado de modelos...".into());
             }
             Err(err) => {
@@ -620,6 +714,7 @@ impl App {
                 self.model_task_running = true;
                 self.pending_model_refresh = true;
                 self.model_input_editing = false;
+                self.model_progress = None;
                 self.push_model_log(format!("Descargando '{requested}'..."));
             }
             Err(err) => {
@@ -654,6 +749,7 @@ impl App {
                 self.model_task = Some(task);
                 self.model_task_running = true;
                 self.pending_model_refresh = true;
+                self.model_progress = None;
                 self.push_model_log(format!("Borrando '{model}'..."));
             }
             Err(err) => {
@@ -676,25 +772,12 @@ impl App {
     fn push_model_log(&mut self, line: String) {
         if self.model_logs.len() >= MAX_MODEL_LOGS {
             self.model_logs.remove(0);
-            self.model_log_output = self.model_logs.join("\n");
         }
-        if !self.model_log_output.is_empty() {
-            self.model_log_output.push('\n');
-        }
-        self.model_log_output.push_str(&line);
         self.model_logs.push(line);
     }
 
     pub fn gpu_recommendation_summary(&self) -> String {
-        let rec = gpu_recommendation(&self.profile.gpu_profile, &self.profile.gpu_preset, &self.profile.variant);
-        if rec.label == "custom" {
-            "gpu: custom".into()
-        } else {
-            format!(
-                "gpu: RTX {} [{}] -> {} / ctx {}",
-                rec.label, rec.preset, rec.model, rec.ctx
-            )
-        }
+        gpu_recommendation_summary_for(&self.profile)
     }
 
     fn apply_gpu_recommendation(&mut self) {
@@ -714,6 +797,59 @@ impl App {
             ),
             false,
         );
+    }
+
+    fn session_lines(&self) -> &VecDeque<String> {
+        if let Some(session) = self.session.as_ref() {
+            &session.lines
+        } else {
+            &self.last_session_lines
+        }
+    }
+
+    fn preview_profile(&self) -> Profile {
+        let mut preview = self.profile.clone();
+        for f in &self.fields {
+            match f.label {
+                "Perfil" => preview.name = f.value.clone(),
+                "GPU" => preview.gpu_profile = f.value.clone(),
+                "GPU preset" => preview.gpu_preset = f.value.clone(),
+                "Modelo" => preview.model = f.value.clone(),
+                "Directorio" => preview.work_dir = f.value.clone(),
+                "Tag" => preview.tag = f.value.clone(),
+                "Contexto" => preview.ctx = f.value.parse().unwrap_or(preview.ctx),
+                "Temperatura" => preview.temperature = f.value.parse().unwrap_or(preview.temperature),
+                "Prompt sistema" => preview.system_prompt = f.value.clone(),
+                "API base" => preview.api_base = f.value.clone(),
+                "URL local" => preview.local_url = f.value.clone(),
+                "Backend" => preview.backend = f.value.clone(),
+                "Critic mode" => preview.critic = f.value == "on",
+                "Modelo Groq" => preview.groq_model = f.value.clone(),
+                "Sandbox" => preview.sandbox = if f.value == "off" { String::new() } else { f.value.clone() },
+                "Sandbox image" => preview.sandbox_image = f.value.clone(),
+                _ => {}
+            }
+        }
+        preview
+    }
+
+    fn refresh_configure_preview(&mut self) {
+        let preview = self.preview_profile();
+        self.configure_preview_command = crate::agent::command_preview(&preview, &self.repo_root);
+        self.configure_preview_detail = match preview.variant {
+            Variant::Local => format!(
+                "workdir: {}  {}",
+                resolve_path_for_display(&preview.work_dir, &self.repo_root),
+                gpu_recommendation_summary_for(&preview)
+            ),
+            Variant::Hybrid => format!(
+                "backend: {}  critic: {}  sandbox: {}  {}",
+                preview.backend,
+                if preview.critic { "on" } else { "off" },
+                if preview.sandbox.is_empty() { "off" } else { &preview.sandbox },
+                gpu_recommendation_summary_for(&preview)
+            ),
+        };
     }
 }
 
@@ -815,6 +951,29 @@ fn profile_select_value(value: &str) -> &str {
     }
 }
 
+fn visible_window_bounds(total: usize, window: usize, scroll_from_bottom: usize) -> (usize, usize) {
+    let window = window.max(1);
+    if total == 0 {
+        return (0, 0);
+    }
+    let max_start = total.saturating_sub(window);
+    let start = max_start.saturating_sub(scroll_from_bottom.min(max_start));
+    let len = (total - start).min(window);
+    (start, len)
+}
+
+fn gpu_recommendation_summary_for(profile: &Profile) -> String {
+    let rec = gpu_recommendation(&profile.gpu_profile, &profile.gpu_preset, &profile.variant);
+    if rec.label == "custom" {
+        "gpu: custom".into()
+    } else {
+        format!(
+            "gpu: RTX {} [{}] -> {} / ctx {}",
+            rec.label, rec.preset, rec.model, rec.ctx
+        )
+    }
+}
+
 fn resolve_path_for_display(path: &str, repo_root: &Path) -> String {
     let raw = PathBuf::from(path);
     let resolved = if path.trim().is_empty() || path.trim() == "." {
@@ -829,7 +988,7 @@ fn resolve_path_for_display(path: &str, repo_root: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{gpu_recommendation, resolve_path_for_display};
+    use super::{gpu_recommendation, resolve_path_for_display, visible_window_bounds};
     use crate::config::Variant;
     use std::path::Path;
 
@@ -851,5 +1010,15 @@ mod tests {
     fn resolve_relative_work_dir_for_preview() {
         let repo = Path::new("/repo");
         assert_eq!(resolve_path_for_display(".", repo), "/repo");
+    }
+
+    #[test]
+    fn visible_window_follows_bottom_by_default() {
+        assert_eq!(visible_window_bounds(10, 4, 0), (6, 4));
+    }
+
+    #[test]
+    fn visible_window_scrolls_up_from_bottom() {
+        assert_eq!(visible_window_bounds(10, 4, 2), (4, 4));
     }
 }

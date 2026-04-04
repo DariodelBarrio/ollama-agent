@@ -11,12 +11,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
+use std::time::{Duration, Instant};
 
 const MAX_LOG_LINES: usize = 400;
+const OUTPUT_BATCH_LINES: usize = 8;
+const OUTPUT_BATCH_WINDOW: Duration = Duration::from_millis(16);
 
 #[derive(Debug, Clone)]
 pub enum SessionEvent {
-    Output(String),
+    OutputBatch(Vec<String>),
 }
 
 pub struct AgentSession {
@@ -24,7 +27,7 @@ pub struct AgentSession {
     stdin: Option<ChildStdin>,
     rx: Receiver<SessionEvent>,
     pub lines: VecDeque<String>,
-    rendered_output: String,
+    changed_since_poll: bool,
 }
 
 impl AgentSession {
@@ -48,14 +51,15 @@ impl AgentSession {
             stdin,
             rx,
             lines: VecDeque::new(),
-            rendered_output: String::new(),
+            changed_since_poll: false,
         })
     }
 
     pub fn drain_events(&mut self) -> Option<Result<ExitStatus, String>> {
+        self.changed_since_poll = false;
         while let Ok(event) = self.rx.try_recv() {
-            let SessionEvent::Output(line) = event;
-            self.push_line(line);
+            let SessionEvent::OutputBatch(lines) = event;
+            self.push_lines(lines);
         }
         match self.child.try_wait() {
             Ok(Some(status)) => Some(Ok(status)),
@@ -75,20 +79,21 @@ impl AgentSession {
         self.child.kill().map_err(|e| e.to_string())
     }
 
-    fn push_line(&mut self, line: String) {
-        if self.lines.len() >= MAX_LOG_LINES {
-            self.lines.pop_front();
-            self.rendered_output = self.lines.iter().cloned().collect::<Vec<_>>().join("\n");
+    fn push_lines(&mut self, lines: Vec<String>) {
+        if lines.is_empty() {
+            return;
         }
-        if !self.rendered_output.is_empty() {
-            self.rendered_output.push('\n');
+        self.changed_since_poll = true;
+        for line in lines {
+            if self.lines.len() >= MAX_LOG_LINES {
+                self.lines.pop_front();
+            }
+            self.lines.push_back(line);
         }
-        self.rendered_output.push_str(&line);
-        self.lines.push_back(line);
     }
 
-    pub fn rendered_output(&self) -> &str {
-        &self.rendered_output
+    pub fn last_event_changed(&self) -> bool {
+        self.changed_since_poll
     }
 }
 
@@ -98,6 +103,8 @@ where
 {
     thread::spawn(move || {
         let reader = BufReader::new(stream);
+        let mut batch = Vec::with_capacity(OUTPUT_BATCH_LINES);
+        let mut last_flush = Instant::now() - OUTPUT_BATCH_WINDOW;
         for line in reader.lines() {
             match line {
                 Ok(text) => {
@@ -106,15 +113,29 @@ where
                     } else {
                         text
                     };
-                    let _ = tx.send(SessionEvent::Output(rendered));
+                    batch.push(rendered);
+                    if batch.len() >= OUTPUT_BATCH_LINES || last_flush.elapsed() >= OUTPUT_BATCH_WINDOW {
+                        flush_batch(&tx, &mut batch);
+                        last_flush = Instant::now();
+                    }
                 }
                 Err(err) => {
-                    let _ = tx.send(SessionEvent::Output(format!("[launcher] Error leyendo salida: {err}")));
+                    batch.push(format!("[launcher] Error leyendo salida: {err}"));
+                    flush_batch(&tx, &mut batch);
                     break;
                 }
             }
         }
+        flush_batch(&tx, &mut batch);
     });
+}
+
+fn flush_batch(tx: &Sender<SessionEvent>, batch: &mut Vec<String>) {
+    if batch.is_empty() {
+        return;
+    }
+    let lines = std::mem::take(batch);
+    let _ = tx.send(SessionEvent::OutputBatch(lines));
 }
 
 /// Returns (executable, prefix_args) for the best available Python on this OS.

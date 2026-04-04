@@ -50,6 +50,7 @@ separated-repos/
 
 # TUI (Rust): artefactos de compilación
 tui/target/
+tui/target-rebuild/
 
 # Runtime local
 .logs/

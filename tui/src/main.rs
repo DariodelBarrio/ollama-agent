@@ -6,7 +6,7 @@ mod config;
 mod models;
 mod ui;
 
-use std::{io, path::PathBuf, time::Duration};
+use std::{io, path::PathBuf};
 
 use app::App;
 use ratatui::{
@@ -60,7 +60,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             dirty = false;
         }
 
-        if event::poll(Duration::from_millis(100))? {
+        if event::poll(app.poll_timeout())? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
                     app.handle_key(key.code, key.modifiers);

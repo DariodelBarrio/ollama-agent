@@ -119,7 +119,8 @@ Current controls:
 - `Esc`: return to configuration
 
 Download progress is shown when the local backend streams status updates in the
-same format as Ollama.
+same format as Ollama. Repeated progress updates are coalesced into a live
+status line instead of flooding the log pane.
 
 ## Profiles
 
@@ -144,7 +145,11 @@ Current session controls:
 - `i`: start editing a line of input for the running agent
 - `Enter`: send that line
 - `F6`: stop the child process
+- `j/k`, `PageUp/PageDown`, `Home/End`: browse retained output
 - `Esc`: return from session view to configuration
+
+The session view follows live output by default. Scrolling up pauses follow
+mode; `End` jumps back to the bottom and resumes it.
 
 ## Practical Limits
 

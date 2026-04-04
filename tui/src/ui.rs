@@ -78,10 +78,12 @@ fn render_statusbar(app: &App, frame: &mut Frame, area: Rect) {
     } else {
         let hint = match app.screen {
             Screen::MainMenu => "j/k navegar  Enter abrir  q salir",
-            Screen::Configure => "Tab campo  Enter editar  F3 modelos  F4 aplicar preset GPU  F5 lanzar  F2 guardar  Esc volver",
+            Screen::Configure => {
+                "Tab campo  Enter editar  F3 modelos  F4 aplicar preset GPU  F5 lanzar  F2 guardar  Esc volver"
+            }
             Screen::Models => "j/k navegar  Enter usar  g recomendado  p pull  d borrar  r refrescar  Esc volver",
             Screen::Profiles => "j/k navegar  Enter cargar  d borrar  Esc volver",
-            Screen::Session => "i entrada  Enter enviar  F6 detener  Esc volver  j/k scroll",
+            Screen::Session => "i entrada  Enter enviar  F6 detener  Esc volver  j/k scroll  End seguir",
         };
         (hint, C_DIM)
     };
@@ -188,20 +190,12 @@ fn render_configure(app: &App, frame: &mut Frame, area: Rect) {
         frame.render_widget(Paragraph::new(line), *row);
     }
 
-    let command = crate::agent::command_preview(&app.profile, &app.repo_root);
-    let detail = match app.profile.variant {
-        Variant::Local => format!("workdir: {}  {}", app.resolve_work_dir(), app.gpu_recommendation_summary()),
-        Variant::Hybrid => format!(
-            "backend: {}  critic: {}  sandbox: {}  {}",
-            app.profile.backend,
-            if app.profile.critic { "on" } else { "off" },
-            if app.profile.sandbox.is_empty() { "off" } else { &app.profile.sandbox },
-            app.gpu_recommendation_summary(),
-        ),
-    };
-    let preview = Paragraph::new(format!("{detail}\ncmd: {command}"))
-        .wrap(Wrap { trim: false })
-        .block(Block::default().title(" Launch Preview ").borders(Borders::TOP).border_style(Style::default().fg(C_BORDER)));
+    let preview = Paragraph::new(format!(
+        "{}\ncmd: {}",
+        app.configure_preview_detail, app.configure_preview_command
+    ))
+    .wrap(Wrap { trim: false })
+    .block(Block::default().title(" Launch Preview ").borders(Borders::TOP).border_style(Style::default().fg(C_BORDER)));
     frame.render_widget(preview, preview_area);
 }
 
@@ -246,10 +240,7 @@ fn render_models(app: &App, frame: &mut Frame, area: Rect) {
             .enumerate()
             .map(|(idx, model)| {
                 let selected = idx == app.model_idx;
-                let size = model
-                    .size_bytes
-                    .map(human_bytes)
-                    .unwrap_or_else(|| "?".into());
+                let size = model.size_bytes.map(human_bytes).unwrap_or_else(|| "?".into());
                 let stamp = model.modified_at.as_deref().unwrap_or("sin fecha");
                 let style = if selected {
                     Style::default().fg(BG).bg(C_SELECT).add_modifier(Modifier::BOLD)
@@ -272,16 +263,15 @@ fn render_models(app: &App, frame: &mut Frame, area: Rect) {
         .border_style(Style::default().fg(C_BORDER));
     frame.render_widget(List::new(model_items).block(models_block), models_area);
 
-    let logs_text = if app.model_logs.is_empty() {
-        "Sin actividad todavia.".to_string()
-    } else {
-        app.model_log_output.clone()
-    };
     let logs_block = Block::default()
         .title(if app.model_task_running { " Model Activity " } else { " Model Log " })
         .borders(Borders::ALL)
         .border_style(Style::default().fg(C_BORDER));
-    frame.render_widget(Paragraph::new(logs_text).wrap(Wrap { trim: false }).block(logs_block), logs_area);
+    let visible_log_height = logs_area.height.saturating_sub(2);
+    frame.render_widget(
+        Paragraph::new(app.model_window_text(visible_log_height)).wrap(Wrap { trim: false }).block(logs_block),
+        logs_area,
+    );
 
     let input_style = if app.model_input_editing {
         Style::default().fg(Color::Black).bg(Color::White)
@@ -345,25 +335,18 @@ fn render_session(app: &App, frame: &mut Frame, area: Rect) {
     ])
     .areas(area);
 
-    let session_title = if app.session.is_some() { " Session " } else { " Last Session " };
     let meta = Paragraph::new(format!(
         "{}\nworkdir: {}\nF6 stop · i input · Esc return to config",
-        crate::agent::command_preview(&app.profile, &app.repo_root),
-        app.resolve_work_dir(),
+        app.session_command_preview, app.session_work_dir_preview,
     ))
     .wrap(Wrap { trim: false })
-    .block(Block::default().title(session_title).borders(Borders::ALL).border_style(Style::default().fg(C_BORDER)));
+    .block(Block::default().title(" Session ").borders(Borders::ALL).border_style(Style::default().fg(C_BORDER)));
     frame.render_widget(meta, meta_area);
 
-    let session_text = if app.session_log_text().is_empty() {
-        "[launcher] No hay salida todavia.".to_string()
-    } else {
-        app.session_log_text().to_string()
-    };
-    let log = Paragraph::new(session_text)
+    let visible_log_height = log_area.height.saturating_sub(2);
+    let log = Paragraph::new(app.session_window_text(visible_log_height))
         .wrap(Wrap { trim: false })
-        .scroll((app.session_scroll, 0))
-        .block(Block::default().title(" Live Output ").borders(Borders::ALL).border_style(Style::default().fg(C_BORDER)));
+        .block(Block::default().title(app.session_view_label()).borders(Borders::ALL).border_style(Style::default().fg(C_BORDER)));
     frame.render_widget(log, log_area);
 
     let input_style = if app.input_editing {
