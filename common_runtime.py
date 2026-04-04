@@ -27,6 +27,8 @@ BLOCKED_COMMAND_PATTERNS = [
     r'chmod\s+777\b',
     r'\bcmd\s*/c\s+.*\b(del|erase|rd|rmdir|format|shutdown)\b',
     r'\bpowershell(\.exe)?\b.*\b(remove-item|del|rm|rmdir)\b',
+    r'\bpython(?:3)?\b.*\b(shutil\.rmtree|os\.(remove|unlink|rmdir)|pathlib\.path\([^)]*\)\.(unlink|rmdir))\b',
+    r'\bnode\b.*\b(rmsync|rmdirsync|unlinksync)\b',
     # Descarga + ejecución inline vía pipe
     r'curl\b.*\|',
     r'wget\b.*\|',

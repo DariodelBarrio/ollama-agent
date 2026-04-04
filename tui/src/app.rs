@@ -77,13 +77,14 @@ pub struct App {
     pub should_quit: bool,
     pub repo_root: PathBuf,
     pub session: Option<AgentSession>,
-    pub last_session_lines: Vec<String>,
+    pub last_session_output: String,
     pub input_buffer: String,
     pub input_editing: bool,
     pub session_scroll: u16,
     pub models: Vec<InstalledModel>,
     pub model_idx: usize,
     pub model_logs: Vec<String>,
+    pub model_log_output: String,
     pub model_input_buffer: String,
     pub model_input_editing: bool,
     pub model_task_running: bool,
@@ -107,13 +108,14 @@ impl App {
             should_quit: false,
             repo_root,
             session: None,
-            last_session_lines: vec![],
+            last_session_output: String::new(),
             input_buffer: String::new(),
             input_editing: false,
             session_scroll: 0,
             models: vec![],
             model_idx: 0,
             model_logs: vec![],
+            model_log_output: String::new(),
             model_input_buffer: String::new(),
             model_input_editing: false,
             model_task_running: false,
@@ -202,7 +204,7 @@ impl App {
                 session
                     .lines
                     .push_back(format!("[launcher] Sesion iniciada: {} · {}", self.profile.variant.label(), self.profile.model));
-                self.last_session_lines.clear();
+                self.last_session_output.clear();
                 self.session = Some(session);
                 self.screen = Screen::Session;
                 self.input_buffer.clear();
@@ -216,7 +218,7 @@ impl App {
 
     pub fn poll_session(&mut self) -> bool {
         let mut changed = false;
-        let mut finished_lines: Option<Vec<String>> = None;
+        let mut finished_output: Option<String> = None;
         let mut status_update: Option<(String, bool)> = None;
 
         if let Some(session) = self.session.as_mut() {
@@ -236,12 +238,12 @@ impl App {
                         status_update = Some(("Fallo al gestionar el proceso del agente.".into(), true));
                     }
                 }
-                finished_lines = Some(session.lines.iter().cloned().collect());
+                finished_output = Some(session.rendered_output().to_string());
             }
         }
 
-        if let Some(lines) = finished_lines {
-            self.last_session_lines = lines;
+        if let Some(output) = finished_output {
+            self.last_session_output = output;
             self.session = None;
             changed = true;
         }
@@ -338,11 +340,11 @@ impl App {
         self.status = Some((msg, is_err));
     }
 
-    pub fn session_log_lines(&self) -> Vec<String> {
+    pub fn session_log_text(&self) -> &str {
         if let Some(session) = self.session.as_ref() {
-            session.lines.iter().cloned().collect()
+            session.rendered_output()
         } else {
-            self.last_session_lines.clone()
+            &self.last_session_output
         }
     }
 
@@ -566,6 +568,10 @@ impl App {
             KeyCode::F(6) => self.stop_session(),
             KeyCode::Up | KeyCode::Char('k') => self.session_scroll = self.session_scroll.saturating_add(1),
             KeyCode::Down | KeyCode::Char('j') => self.session_scroll = self.session_scroll.saturating_sub(1),
+            KeyCode::PageUp => self.session_scroll = self.session_scroll.saturating_add(10),
+            KeyCode::PageDown => self.session_scroll = self.session_scroll.saturating_sub(10),
+            KeyCode::Home => self.session_scroll = u16::MAX,
+            KeyCode::End => self.session_scroll = 0,
             KeyCode::Esc => self.screen = Screen::Configure,
             _ => {}
         }
@@ -670,7 +676,12 @@ impl App {
     fn push_model_log(&mut self, line: String) {
         if self.model_logs.len() >= MAX_MODEL_LOGS {
             self.model_logs.remove(0);
+            self.model_log_output = self.model_logs.join("\n");
         }
+        if !self.model_log_output.is_empty() {
+            self.model_log_output.push('\n');
+        }
+        self.model_log_output.push_str(&line);
         self.model_logs.push(line);
     }
 
@@ -718,20 +729,20 @@ fn gpu_recommendation(gpu_profile: &str, gpu_preset: &str, variant: &Variant) ->
         ("5060", "safe", Variant::Local) | ("5060", "safe", Variant::Hybrid) => GpuRecommendation {
             label: "5060",
             preset: "safe",
-            model: "qwen2.5-coder:7b",
-            ctx: 4096,
+            model: "qwen2.5-coder:3b",
+            ctx: 2048,
         },
         ("5060", "balanced", Variant::Local) | ("5060", "balanced", Variant::Hybrid) => GpuRecommendation {
             label: "5060",
             preset: "balanced",
             model: "qwen2.5-coder:7b",
-            ctx: 8192,
+            ctx: 4096,
         },
         ("5060", "max", Variant::Local) | ("5060", "max", Variant::Hybrid) => GpuRecommendation {
             label: "5060",
             preset: "max",
-            model: "qwen2.5-coder:14b",
-            ctx: 4096,
+            model: "qwen2.5-coder:7b",
+            ctx: 8192,
         },
         ("5070", "safe", Variant::Local) | ("5070", "safe", Variant::Hybrid) => GpuRecommendation {
             label: "5070",
@@ -806,6 +817,39 @@ fn profile_select_value(value: &str) -> &str {
 
 fn resolve_path_for_display(path: &str, repo_root: &Path) -> String {
     let raw = PathBuf::from(path);
-    let resolved = if raw.is_absolute() { raw } else { repo_root.join(raw) };
+    let resolved = if path.trim().is_empty() || path.trim() == "." {
+        repo_root.to_path_buf()
+    } else if raw.is_absolute() {
+        raw
+    } else {
+        repo_root.join(raw)
+    };
     resolved.to_string_lossy().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{gpu_recommendation, resolve_path_for_display};
+    use crate::config::Variant;
+    use std::path::Path;
+
+    #[test]
+    fn gpu_recommendation_5060_safe_is_conservative() {
+        let rec = gpu_recommendation("5060", "safe", &Variant::Local);
+        assert_eq!(rec.model, "qwen2.5-coder:3b");
+        assert_eq!(rec.ctx, 2048);
+    }
+
+    #[test]
+    fn gpu_recommendation_5090_max_allows_larger_context() {
+        let rec = gpu_recommendation("5090", "max", &Variant::Hybrid);
+        assert_eq!(rec.model, "qwen2.5-coder:32b");
+        assert_eq!(rec.ctx, 32768);
+    }
+
+    #[test]
+    fn resolve_relative_work_dir_for_preview() {
+        let repo = Path::new("/repo");
+        assert_eq!(resolve_path_for_display(".", repo), "/repo");
+    }
 }

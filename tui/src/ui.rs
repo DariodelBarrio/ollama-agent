@@ -275,7 +275,7 @@ fn render_models(app: &App, frame: &mut Frame, area: Rect) {
     let logs_text = if app.model_logs.is_empty() {
         "Sin actividad todavia.".to_string()
     } else {
-        app.model_logs.join("\n")
+        app.model_log_output.clone()
     };
     let logs_block = Block::default()
         .title(if app.model_task_running { " Model Activity " } else { " Model Log " })
@@ -355,13 +355,12 @@ fn render_session(app: &App, frame: &mut Frame, area: Rect) {
     .block(Block::default().title(session_title).borders(Borders::ALL).border_style(Style::default().fg(C_BORDER)));
     frame.render_widget(meta, meta_area);
 
-    let lines = app.session_log_lines();
-    let joined = if lines.is_empty() {
+    let session_text = if app.session_log_text().is_empty() {
         "[launcher] No hay salida todavia.".to_string()
     } else {
-        lines.join("\n")
+        app.session_log_text().to_string()
     };
-    let log = Paragraph::new(joined)
+    let log = Paragraph::new(session_text)
         .wrap(Wrap { trim: false })
         .scroll((app.session_scroll, 0))
         .block(Block::default().title(" Live Output ").borders(Borders::ALL).border_style(Style::default().fg(C_BORDER)));

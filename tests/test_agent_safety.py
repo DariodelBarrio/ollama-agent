@@ -92,6 +92,22 @@ class CommandSafetyTests(unittest.TestCase):
         self.assertIn("error", result)
         self.assertIn("bloqueado", result["error"].lower())
 
+    def test_run_command_blocks_inline_python_delete(self):
+        result = base_agent.run_command(
+            'python -c "import shutil; shutil.rmtree(\'tmp\')"',
+            timeout=5,
+        )
+        self.assertIn("error", result)
+        self.assertIn("bloqueado", result["error"].lower())
+
+    def test_run_command_blocks_inline_node_delete(self):
+        result = base_agent.run_command(
+            'node -e "require(\'fs\').rmSync(\'tmp\', { recursive: true, force: true })"',
+            timeout=5,
+        )
+        self.assertIn("error", result)
+        self.assertIn("bloqueado", result["error"].lower())
+
 
 # ── edit_file fuzzy matching ──────────────────────────────────────────────────
 class EditFileFuzzyTests(unittest.TestCase):
@@ -285,6 +301,27 @@ class WriteFileSizeLimitTests(unittest.TestCase):
     def test_write_file_accepts_normal_content(self):
         result = base_agent.write_file(str(self._tmp / "ok.txt"), "hola\n")
         self.assertIn("success", result)
+
+
+class ToolCallRecoveryTests(unittest.TestCase):
+    def test_extracts_tool_call_from_markdown_json_block(self):
+        payload = """```json
+{"name": "write_file", "arguments": {"path": "demo.txt", "content": "hola"}}
+```"""
+        result = base_agent.extract_tool_calls_from_text(payload)
+        self.assertEqual(result[0]["name"], "write_file")
+        self.assertEqual(result[0]["arguments"]["path"], "demo.txt")
+
+    def test_extracts_tool_call_from_python_style_dict_block(self):
+        payload = """```python
+{
+    "name": "create_directory",
+    "arguments": {"path": "demo"}
+}
+```"""
+        result = base_agent.extract_tool_calls_from_text(payload)
+        self.assertEqual(result[0]["name"], "create_directory")
+        self.assertEqual(result[0]["arguments"]["path"], "demo")
 
 
 if __name__ == "__main__":

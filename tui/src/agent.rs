@@ -24,6 +24,7 @@ pub struct AgentSession {
     stdin: Option<ChildStdin>,
     rx: Receiver<SessionEvent>,
     pub lines: VecDeque<String>,
+    rendered_output: String,
 }
 
 impl AgentSession {
@@ -47,6 +48,7 @@ impl AgentSession {
             stdin,
             rx,
             lines: VecDeque::new(),
+            rendered_output: String::new(),
         })
     }
 
@@ -76,8 +78,17 @@ impl AgentSession {
     fn push_line(&mut self, line: String) {
         if self.lines.len() >= MAX_LOG_LINES {
             self.lines.pop_front();
+            self.rendered_output = self.lines.iter().cloned().collect::<Vec<_>>().join("\n");
         }
+        if !self.rendered_output.is_empty() {
+            self.rendered_output.push('\n');
+        }
+        self.rendered_output.push_str(&line);
         self.lines.push_back(line);
+    }
+
+    pub fn rendered_output(&self) -> &str {
+        &self.rendered_output
     }
 }
 
@@ -108,6 +119,18 @@ where
 
 /// Returns (executable, prefix_args) for the best available Python on this OS.
 pub fn find_python() -> (String, Vec<String>) {
+    if let Ok(explicit) = std::env::var("OLLAMA_AGENT_PYTHON") {
+        if !explicit.trim().is_empty() && probe_path(&explicit, &["-c", "pass"]) {
+            return (explicit, vec![]);
+        }
+    }
+
+    for path in python_path_candidates() {
+        if probe_path(&path, &["-c", "pass"]) {
+            return (path, vec![]);
+        }
+    }
+
     if probe("py", &["-3", "-c", "pass"]) {
         return ("py".into(), vec!["-3".into()]);
     }
@@ -115,6 +138,22 @@ pub fn find_python() -> (String, Vec<String>) {
         return ("python3".into(), vec![]);
     }
     ("python".into(), vec![])
+}
+
+fn python_path_candidates() -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        out.push(cwd.join(".venv").join("Scripts").join("python.exe").to_string_lossy().to_string());
+        out.push(cwd.join("venv").join("Scripts").join("python.exe").to_string_lossy().to_string());
+    }
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        let local = PathBuf::from(local);
+        out.push(local.join("Python").join("bin").join("python.exe").to_string_lossy().to_string());
+        for version in ["Python312", "Python311", "Python310", "Python39"] {
+            out.push(local.join("Programs").join("Python").join(version).join("python.exe").to_string_lossy().to_string());
+        }
+    }
+    out
 }
 
 fn probe(exe: &str, args: &[&str]) -> bool {
@@ -125,6 +164,18 @@ fn probe(exe: &str, args: &[&str]) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+fn probe_path(exe: &str, args: &[&str]) -> bool {
+    let path = Path::new(exe);
+    path.exists()
+        && Command::new(path)
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
 }
 
 pub fn build_command(profile: &Profile, repo_root: &Path) -> Command {
