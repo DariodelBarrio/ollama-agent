@@ -33,6 +33,7 @@ from base_agent import (
     search_web, fetch_url, change_directory,
     BASE_TOOL_MAP as TOOL_MAP,
     BASE_TOOLS as TOOLS,
+    extract_tool_calls_from_text,
     # UI
     _render_inline, _TOOL_LABELS, _rel,
     print_tool_call, print_tool_result,
@@ -388,7 +389,11 @@ class Agent:
                                 "name": entry["name"], "arguments": args})
 
         if not tool_calls:
-            console.print()
+            tool_calls = extract_tool_calls_from_text("".join(collected))
+            if tool_calls:
+                collected.clear()
+            else:
+                console.print()
         console.print(f"[{C_DIM}]✳ Brewed for {elapsed_total:.0f}s[/]")
         return "".join(collected), tool_calls
 

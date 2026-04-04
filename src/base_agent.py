@@ -10,13 +10,15 @@ Centralises:
 """
 from __future__ import annotations
 
+import ast
 import json
 import logging
+import re
 import sys
 from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 # Ensure repo root is on the path so common_* modules are importable
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -172,6 +174,84 @@ BASE_TOOL_MAP: dict = {
 }
 
 BASE_TOOLS: list = build_tool_definitions(include_web=True)
+
+_TOOL_FENCE_RE = re.compile(r"```(?:json|python|py)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
+
+
+def _decode_tool_payload(payload: str) -> Any:
+    text = (payload or "").strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    try:
+        return ast.literal_eval(text)
+    except (SyntaxError, ValueError):
+        return None
+
+
+def _coerce_tool_call_objects(candidate: Any) -> list[dict]:
+    if isinstance(candidate, dict) and "tool_calls" in candidate:
+        candidate = candidate["tool_calls"]
+    if isinstance(candidate, dict):
+        candidate = [candidate]
+    if not isinstance(candidate, list):
+        return []
+
+    parsed: list[dict] = []
+    valid_names = set(BASE_TOOL_MAP)
+    for obj in candidate:
+        if not isinstance(obj, dict):
+            continue
+        name = obj.get("name")
+        args = obj.get("arguments")
+        if name not in valid_names or args is None:
+            continue
+        if not isinstance(args, dict):
+            if isinstance(args, str):
+                decoded_args = _decode_tool_payload(args)
+                args = decoded_args if isinstance(decoded_args, dict) else {}
+            else:
+                args = {}
+        parsed.append({
+            "id": obj.get("id", name),
+            "name": name,
+            "arguments": args,
+        })
+    return parsed
+
+
+def extract_tool_calls_from_text(raw_text: str) -> list[dict]:
+    """Best-effort recovery for models that print tool calls as text.
+
+    Supports:
+    - raw JSON object/array
+    - Python/JSON dicts inside fenced markdown blocks
+    - wrappers like {"tool_calls": [...]}
+    """
+    text = (raw_text or "").strip()
+    if not text:
+        return []
+
+    candidates: list[Any] = []
+
+    decoded = _decode_tool_payload(text)
+    if decoded is not None:
+        candidates.append(decoded)
+
+    for match in _TOOL_FENCE_RE.finditer(text):
+        block = match.group(1).strip()
+        decoded_block = _decode_tool_payload(block)
+        if decoded_block is not None:
+            candidates.append(decoded_block)
+
+    for candidate in candidates:
+        parsed = _coerce_tool_call_objects(candidate)
+        if parsed:
+            return parsed
+    return []
 
 
 # ── UI helpers ────────────────────────────────────────────────────────────────

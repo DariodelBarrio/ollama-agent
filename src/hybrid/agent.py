@@ -34,6 +34,7 @@ from base_agent import (
     list_directory, delete_file, create_directory, move_file,
     search_web, fetch_url, change_directory,
     BASE_TOOL_MAP, BASE_TOOLS,
+    extract_tool_calls_from_text,
     _render_inline, _TOOL_LABELS, _rel,
     print_tool_call, print_tool_result,
 )
@@ -756,27 +757,9 @@ class Agent:
                 except json.JSONDecodeError:
                     tool_calls_raw.append({"id": tc["id"] or tc["name"], "name": tc["name"], "arguments": {}})
 
-            # Fallback: el modelo emitió el tool call como texto JSON
+            # Fallback: el modelo emitió el tool call como texto JSON/Markdown
             if not tool_calls_raw and collected:
-                raw_text = "".join(collected).strip()
-                candidates = []
-                if raw_text.startswith("["):
-                    try: candidates = json.loads(raw_text)
-                    except json.JSONDecodeError: pass
-                elif raw_text.startswith("{"):
-                    try: candidates = [json.loads(raw_text)]
-                    except json.JSONDecodeError: pass
-                for obj in candidates:
-                    if isinstance(obj, dict) and "name" in obj and "arguments" in obj:
-                        args = obj["arguments"]
-                        if not isinstance(args, dict):
-                            try: args = json.loads(args)
-                            except (json.JSONDecodeError, TypeError): args = {}
-                        tool_calls_raw.append({
-                            "id":        obj.get("id", obj["name"]),
-                            "name":      obj["name"],
-                            "arguments": args,
-                        })
+                tool_calls_raw.extend(extract_tool_calls_from_text("".join(collected)))
                 if tool_calls_raw:
                     collected.clear()
                 elif json_mode[0]:
