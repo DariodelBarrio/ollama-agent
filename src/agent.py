@@ -35,6 +35,8 @@ from base_agent import (
     BASE_TOOLS as TOOLS,
     extract_tool_calls_from_text,
     detect_file_creation_intent,
+    extract_candidate_paths,
+    resolve_in_workspace,
     # UI
     _render_inline, _TOOL_LABELS, _rel,
     print_tool_call, print_tool_result,
@@ -534,6 +536,8 @@ class Agent:
 
             # File-creation post-condition tracking
             _file_intent    = detect_file_creation_intent(user_input)
+            candidates      = extract_candidate_paths(user_input)
+            _expected_path  = resolve_in_workspace(candidates[0]).resolve() if candidates else None
             _file_created   = False
             _recovery_done  = False
 
@@ -590,9 +594,15 @@ class Agent:
                                         "Herramienta devolvió error",
                                         extra={"tool_name": fn_name, "error_details": result["error"]}
                                     )
-                                # Track successful file creation
+                                # Track successful file creation and ensure it matches the expected path if any.
                                 if fn_name == "write_file" and "error" not in result:
-                                    _file_created = True
+                                    target = fn_args.get("path") or result.get("path")
+                                    if target:
+                                        target_path = resolve_in_workspace(str(target))
+                                        if _expected_path is None or target_path == _expected_path:
+                                            _file_created = True
+                                    else:
+                                        _file_created = True
                         else:
                             result = {"error": f"Tool desconocida: {fn_name}"}
                             self.logger.error("Tool desconocida",
@@ -610,10 +620,15 @@ class Agent:
                     # the model just returned plain text, give it one explicit nudge.
                     if _file_intent and not _file_created and not _recovery_done:
                         _recovery_done = True
+                        target_hint = ""
+                        if _expected_path is not None:
+                            rel = _expected_path.relative_to(Path(self.work_dir))
+                            target_hint = f" Ruta esperada: {rel}"
                         recovery = (
                             "No creaste el archivo — respondiste con texto. "
                             "Usa write_file() ahora para crear el archivo en la ruta que indicó el usuario. "
                             "Si el directorio no existe dentro del workspace, usa create_directory() primero."
+                            f"{target_hint}"
                         )
                         self.messages.append({"role": "user", "content": recovery})
                         console.print(f"[{C_DIM}]  ↺ El modelo no usó write_file() — reintentando...[/]")

@@ -285,38 +285,40 @@ _INTENT_PATH_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Explicit creation phrases in Spanish and English.
+# Explicit creation phrases in Spanish and English (with file noun).
 _INTENT_PHRASE_RE = re.compile(
     r'\b('
     r'cr[eé]a(?:r|me)?\s+(?:un\s+|el\s+|una\s+)?(?:script|archivo|fichero|programa|m[oó]dulo|clase|funci[oó]n|test|app)\b'
     r'|hazme\s+(?:un\s+|una\s+)?(?:script|archivo|fichero|programa|test)\b'
     r'|gu[aá]rdal[oa]\s+en\b'
-    r'|ponl[oa]\s+en\b'
     r'|escr[ií]bel[oa]\s+(?:en|a)\b'
     r'|create\s+(?:a\s+|the\s+)?(?:script|file|program|module|class|function|test|app)\b'
     r'|write\s+(?:a\s+|the\s+)?(?:script|file|program|module|class|function)\b'
     r'|save\s+(?:it\s+)?(?:to|in|at)\b'
-    r'|put\s+it\s+(?:in|to|at)\b'
     r')',
+    re.IGNORECASE,
+)
+
+# Verbs that imply creating/writing when combined with an explicit path.
+_INTENT_VERB_RE = re.compile(
+    r'\b(cr[eé]a|crear|haz|hazme|genera|generate|create|write|save|escribe|guarda)\b',
     re.IGNORECASE,
 )
 
 
 def detect_file_creation_intent(user_input: str) -> bool:
-    """Return True when the user message clearly requests a file to be created.
-
-    Uses two complementary signals:
-    - an explicit file path with a recognised extension (e.g. ``scripts/test.py``)
-    - a creation-verb + file-noun phrase in Spanish or English
-
-    Kept deliberately simple to avoid false positives on ordinary conversation.
-    """
+    """True solo si hay petición de creación: verbo+noun o verbo+ruta."""
     text = user_input or ""
-    if _INTENT_PATH_RE.search(text):
-        return True
-    if _INTENT_PHRASE_RE.search(text):
-        return True
-    return False
+    has_phrase = _INTENT_PHRASE_RE.search(text) is not None
+    has_path = _INTENT_PATH_RE.search(text) is not None
+    has_verb = _INTENT_VERB_RE.search(text) is not None
+    return has_phrase or (has_path and has_verb)
+
+
+def extract_candidate_paths(user_input: str) -> list[str]:
+    """Devuelve rutas que parecen archivos solicitados."""
+    text = user_input or ""
+    return [m.group(0) for m in _INTENT_PATH_RE.finditer(text)]
 
 
 # ── UI helpers ────────────────────────────────────────────────────────────────
@@ -346,6 +348,14 @@ def _rel(path_str: str) -> str:
         return str(Path(path_str).relative_to(Path(_WORK_DIR)))
     except ValueError:
         return path_str
+
+
+def resolve_in_workspace(path_str: str) -> Path:
+    """Resolve a path inside the current workspace root."""
+    p = Path(path_str)
+    if not p.is_absolute():
+        p = Path(_WORK_DIR) / p
+    return p.resolve()
 
 
 def _render_inline(text: str) -> Text:

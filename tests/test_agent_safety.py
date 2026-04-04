@@ -351,8 +351,8 @@ class FileCreationIntentTests(unittest.TestCase):
         self._pos("hazme un archivo en src/index.js")
 
     def test_explicit_path_only(self):
-        # Path with extension is alone a sufficient signal.
-        self._pos("ponlo en utils/helpers.py")
+        # Una ruta sin verbo ya no activa intención de creación.
+        self._neg("ponlo en utils/helpers.py")
 
     def test_spanish_verb_archivo(self):
         self._pos("créame un archivo en esa carpeta")
