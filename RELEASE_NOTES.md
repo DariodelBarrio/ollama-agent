@@ -27,3 +27,4 @@ Recommended release posture:
 - use Local for the smallest and clearest setup
 - treat Hybrid as useful but more experimental
 - treat the TUI as supported for launch and session management, while keeping the Python core as the source of truth
+- treat legacy `.bat` launchers as compatibility and quick-launch paths, not as the canonical product surface

@@ -4,15 +4,17 @@ Terminal-first coding agent for OpenAI-compatible backends.
 
 Current release: `v0.1.0` ([`VERSION`](VERSION))
 
-Split repositories:
+This repository is the combined source tree.
+
+Standalone split repositories:
 
 - Windows legacy `.bat` repo: `https://github.com/DariodelBarrio/ollama-agent-windows-bat`
 - TUI launcher repo: `https://github.com/DariodelBarrio/ollama-agent-tui`
 
 Ollama Agent is a local-first CLI that can inspect a repository, read and edit
-files, run shell commands inside the workspace, and answer with a concise
-terminal workflow. The repository currently ships two variants built on the
-same core:
+files, run shell commands inside the workspace, and answer in a concise
+terminal workflow. The product currently has two Python execution variants
+behind one shared runtime:
 
 - **Local**: [`src/agent.py`](src/agent.py)
 - **Hybrid**: [`src/hybrid/agent.py`](src/hybrid/agent.py)
@@ -29,7 +31,7 @@ The agent is designed for terminal-based coding tasks in a local repository:
 - use web search and URL fetch when enabled
 - keep an interactive coding loop with tool calls and streamed output
 
-It is not a hosted service, not a GUI product, and not a hardened sandbox.
+It is not a hosted service, not a web GUI, and not a hardened sandbox.
 
 ## Variants
 
@@ -51,11 +53,11 @@ It is not a hosted service, not a GUI product, and not a hardened sandbox.
 
 ## Installation
 
-Choose one of these paths:
+Choose one of these install paths:
 
-- Base install for the Local agent: `python scripts/install.py`
-- Extended install for Hybrid: `python scripts/install.py --hybrid`
-- Rust TUI launcher: build [`tui/`](tui/) with `cargo build --release`
+- Local core: `python scripts/install.py`
+- Hybrid core: `python scripts/install.py --hybrid`
+- TUI launcher: build [`tui/`](tui/) with `cargo build --release`
 
 Prerequisites:
 
@@ -83,8 +85,8 @@ Prerequisites:
 git clone https://github.com/DariodelBarrio/ollama-agent.git
 cd ollama-agent
 python scripts/install.py
-ollama pull qwen2.5-coder:14b
-python src/agent.py --model qwen2.5-coder:14b --dir /path/to/project
+ollama pull qwen2.5-coder:7b
+python src/agent.py --model qwen2.5-coder:7b --dir /path/to/project
 ```
 
 ### Hybrid
@@ -139,27 +141,27 @@ In Hybrid:
 - `--groq-model` is the explicit Groq fallback/override model.
 - `--local-url` is the local OpenAI-compatible endpoint.
 
-Canonical launchers:
+Canonical launch paths in this combined repo:
 
 - `tui/` (`oat`) for interactive terminal-first launch and session management
 - `src/agent.py`
 - `src/hybrid/agent.py`
-- `src/hybrid/windows/*.bat`
-- `src/hybrid/unix/*.sh`
+- `src/hybrid/windows/*.bat` and `IA/MEGA/*.bat` for Windows compatibility and quick-launch flows
+- `src/hybrid/unix/*.sh` for Unix shell launchers
 
 `IA/MEGA/` remains in the repository only as a compatibility layer for older
 Windows launch flows. It is not the canonical location for active code.
 
 ### Launch Paths
 
-The repository intentionally keeps two separate launch paths on Windows:
+The project intentionally keeps two separate launch paths on Windows:
 
 - `tui\target\release\oat.exe`: compiled terminal-first launcher and manager
 - `IA\MEGA\*.bat` and `src\hybrid\windows\*.bat`: legacy script launchers kept for compatibility
 
 Use `oat.exe` when you want profiles, model management, live session output,
 and a managed terminal UI. Use the `.bat` launchers when you want the older
-direct-script flow without the TUI.
+direct-script flow, a quick Windows shortcut, or a compatibility path.
 
 The TUI-specific compatibility changes do not replace or remove the legacy
 `.bat` entry points.
@@ -187,6 +189,12 @@ Core modules:
 - [`common_tools.py`](common_tools.py): tool runtime
 - [`common_runtime.py`](common_runtime.py): path and command safety guards
 - [`agent_prompting.py`](agent_prompting.py): prompt loading and rendering
+
+Launch boundary:
+
+- Python remains the execution engine
+- Rust TUI is a launcher and session manager around the Python core
+- `.bat` launchers stay thin wrappers around the Python Hybrid entry path
 
 ## Security Model
 
@@ -220,6 +228,7 @@ the optional Docker command sandbox described in [docs/security.md](docs/securit
 Experimental areas:
 
 - Hybrid routing heuristics
+- smaller local models using tool calls reliably
 - persistent memory behavior in Hybrid
 - benchmark methodology and reporting workflow
 - optional Docker sandbox integration
@@ -278,6 +287,18 @@ cargo build --release
 
 The Rust TUI is part of `v0.1.0`, but it should still be treated as an early
 launcher layer around the Python core.
+
+What CI currently proves:
+
+- Python unit tests on Windows
+- CLI help/smoke paths for Local, Hybrid, and benchmark helper
+- Rust TUI build and unit tests on Linux
+
+What CI does not fully prove:
+
+- end-to-end Hybrid execution against real Groq or Ollama services
+- interactive `.bat` launcher behavior
+- model quality or tool reliability for any specific local model
 
 ## Repository Layout
 

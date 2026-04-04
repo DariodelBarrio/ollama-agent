@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is intentionally simple for now.
 
+## [Unreleased]
+
+### Added
+
+- Windows launcher helpers that resolve `python` and `ollama` more reliably on local machines
+- guided legacy launchers for starting Ollama and pulling lighter local coder models
+- lighter legacy local launcher variants for `qwen2.5-coder:7b` and `qwen2.5-coder:3b`
+
+### Changed
+
+- Local and Hybrid agents now recover tool calls when smaller models print them as JSON-like text inside Markdown fences
+- Main README now links to the standalone Windows `.bat` and TUI split repositories
+- Legacy launchers fail earlier with clearer backend and Python resolution errors instead of opaque connection failures
+
 ## [0.1.0] - 2026-04-03
 
 Initial public release.

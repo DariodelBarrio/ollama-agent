@@ -6,9 +6,10 @@ the end state of the project.
 ## Near Term
 
 - Stabilize the terminal-first launcher workflow across Local, Hybrid, and TUI
-- Improve test coverage for the shared runtime and TUI integration points
-- Tighten documentation around supported backends and model-management limits
-- Reduce legacy naming and compatibility shims where they no longer help users
+- Improve test coverage for shared runtime, tool-call recovery, and TUI integration points
+- Tighten documentation around supported backends, launcher paths, and model-management limits
+- Reduce legacy naming confusion without deleting useful compatibility paths
+- Improve TUI responsiveness and session ergonomics on lower-end Windows laptops
 
 ## Later
 

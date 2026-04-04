@@ -9,7 +9,7 @@ Canonical agent entry points:
 - [`../src/agent.py`](../src/agent.py)
 - [`../src/hybrid/agent.py`](../src/hybrid/agent.py)
 
-## What Phase 1 Includes
+## Current Scope
 
 The current TUI is intentionally small but useful:
 
@@ -148,7 +148,7 @@ Current session controls:
 
 ## Practical Limits
 
-This is a first-phase TUI, not a full terminal multiplexer.
+This is an early launcher, not a full terminal multiplexer.
 
 - input forwarding is line-based
 - the integrated session does not try to preserve `prompt_toolkit` features
@@ -172,6 +172,7 @@ GPU recommendation limits:
 - recommendations depend on both the selected GPU and the selected level: `safe`, `balanced`, or `max`
 - recommendations only apply suggested defaults for `model` and `ctx`
 - model installation can use that same recommendation as a pull target
+- lower-VRAM presets now bias toward smaller models first, especially on `5060`
 - larger recommendations for `5080` and `5090` are intended for users with more VRAM headroom, but they are not guarantees
 
 ## Environment Variables
