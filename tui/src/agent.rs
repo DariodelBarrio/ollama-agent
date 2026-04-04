@@ -14,6 +14,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const MAX_LOG_LINES: usize = 400;
+// Small batches cut redraw churn without turning the launcher into a delayed
+// "buffered terminal". The window is short enough to keep output feeling live.
 const OUTPUT_BATCH_LINES: usize = 8;
 const OUTPUT_BATCH_WINDOW: Duration = Duration::from_millis(16);
 
@@ -56,6 +58,8 @@ impl AgentSession {
     }
 
     pub fn drain_events(&mut self) -> Option<Result<ExitStatus, String>> {
+        // The UI loop only needs to know whether something changed since the
+        // last poll; it doesn't need per-line invalidation state.
         self.changed_since_poll = false;
         while let Ok(event) = self.rx.try_recv() {
             let SessionEvent::OutputBatch(lines) = event;
@@ -103,6 +107,8 @@ where
 {
     thread::spawn(move || {
         let reader = BufReader::new(stream);
+        // Batch stdout/stderr lines briefly so a fast model or chatty command
+        // doesn't force one UI refresh per line.
         let mut batch = Vec::with_capacity(OUTPUT_BATCH_LINES);
         let mut last_flush = Instant::now() - OUTPUT_BATCH_WINDOW;
         for line in reader.lines() {
@@ -217,6 +223,8 @@ pub fn build_command(profile: &Profile, repo_root: &Path) -> Command {
     cmd.arg("--ctx").arg(profile.ctx.to_string());
     cmd.arg("--temp").arg(format!("{:.2}", profile.temperature));
     cmd.env("PYTHONUNBUFFERED", "1");
+    cmd.env("PYTHONIOENCODING", "utf-8");
+    cmd.env("PYTHONUTF8", "1");
 
     if !profile.system_prompt.trim().is_empty() {
         cmd.arg("--system-prompt").arg(&profile.system_prompt);

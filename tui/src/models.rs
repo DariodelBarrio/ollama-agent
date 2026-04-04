@@ -21,6 +21,8 @@ pub struct InstalledModel {
 #[derive(Debug)]
 pub enum ModelEvent {
     Status(String),
+    // Progress is kept separate from Status so the UI can replace the live
+    // progress line instead of appending dozens of near-identical entries.
     Progress(String),
     Listed(Result<Vec<InstalledModel>, String>),
     Finished(Result<String, String>),
@@ -162,6 +164,9 @@ pub fn pull_model(base: &str, model: &str, tx: &Sender<ModelEvent>) -> Result<St
         if let Some(error) = update.error {
             return Err(format!("Error descargando '{model}': {error}"));
         }
+        // Ollama-style pull streams emit both milestone strings and repeated
+        // percentage updates. The caller decides whether to append or replace
+        // the visible status based on this split.
         if let Some((status, is_progress)) = render_pull_status(&update) {
             last_status = status.clone();
             let event = if is_progress {

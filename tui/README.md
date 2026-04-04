@@ -142,10 +142,10 @@ Current session controls:
 - `F4`: apply the selected GPU recommendation to `model` and `ctx`
 - `F5`: launch
 - `F2`: save current profile
-- `i`: start editing a line of input for the running agent
-- `Enter`: send that line
+- type directly in the input box
+- `Enter`: send the current line
 - `F6`: stop the child process
-- `j/k`, `PageUp/PageDown`, `Home/End`: browse retained output
+- `Up/Down`, `PageUp/PageDown`, `Home/End`: browse retained output
 - `Esc`: return from session view to configuration
 
 The session view follows live output by default. Scrolling up pauses follow

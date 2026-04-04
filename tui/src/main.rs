@@ -45,6 +45,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let backend = CrosstermBackend::new(io::stdout());
     let mut term = Terminal::new(backend)?;
     let mut app = App::new(repo_root);
+    // Draw only when state changed. The app already polls background tasks
+    // continuously, so unconditional redraws would just re-render the same
+    // frame and make navigation feel heavier on Windows terminals.
     let mut dirty = true;
 
     loop {

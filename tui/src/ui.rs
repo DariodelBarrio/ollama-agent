@@ -83,7 +83,7 @@ fn render_statusbar(app: &App, frame: &mut Frame, area: Rect) {
             }
             Screen::Models => "j/k navegar  Enter usar  g recomendado  p pull  d borrar  r refrescar  Esc volver",
             Screen::Profiles => "j/k navegar  Enter cargar  d borrar  Esc volver",
-            Screen::Session => "i entrada  Enter enviar  F6 detener  Esc volver  j/k scroll  End seguir",
+            Screen::Session => "Escribir directo  Enter enviar  F6 detener  Flechas/PgUp/PgDn scroll  End seguir  Esc volver",
         };
         (hint, C_DIM)
     };
@@ -336,7 +336,7 @@ fn render_session(app: &App, frame: &mut Frame, area: Rect) {
     .areas(area);
 
     let meta = Paragraph::new(format!(
-        "{}\nworkdir: {}\nF6 stop · i input · Esc return to config",
+        "{}\nworkdir: {}\nEnter enviar · F6 stop · Esc return to config",
         app.session_command_preview, app.session_work_dir_preview,
     ))
     .wrap(Wrap { trim: false })
@@ -349,17 +349,11 @@ fn render_session(app: &App, frame: &mut Frame, area: Rect) {
         .block(Block::default().title(app.session_view_label()).borders(Borders::ALL).border_style(Style::default().fg(C_BORDER)));
     frame.render_widget(log, log_area);
 
-    let input_style = if app.input_editing {
-        Style::default().fg(Color::Black).bg(Color::White)
+    let input_style = Style::default().fg(Color::Black).bg(Color::White);
+    let input_text = if app.input_buffer.is_empty() {
+        "|".into()
     } else {
-        Style::default().fg(C_DIM)
-    };
-    let input_text = if app.input_editing {
-        format!("{}_", app.input_buffer)
-    } else if app.input_buffer.is_empty() {
-        "Pulsa i para escribir una linea y Enter para enviarla.".into()
-    } else {
-        app.input_buffer.clone()
+        format!("{}|", app.input_buffer)
     };
     let input = Paragraph::new(Span::styled(input_text, input_style))
         .block(Block::default().title(" Input ").borders(Borders::ALL).border_style(Style::default().fg(C_BORDER)));

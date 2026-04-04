@@ -13,6 +13,7 @@ from __future__ import annotations
 import ast
 import json
 import logging
+import os
 import re
 import sys
 from datetime import datetime, timezone
@@ -51,7 +52,28 @@ C_TEXT    = "#D4D4D4"
 C_ROUTER  = "#FFD700"
 C_CRITIC  = "#FF8C00"
 
-console = Console()
+def _build_console() -> Console:
+    simple_input = os.getenv("OLLAMA_AGENT_SIMPLE_INPUT", "").strip().lower() in {"1", "true", "yes"}
+    if simple_input:
+        # The TUI captures stdout/stderr through pipes on Windows. Rich's
+        # styled console path can still trip Win32-specific rendering there,
+        # so the managed launcher path uses a plain non-terminal console. We
+        # still keep markup parsing on to avoid leaking literal [color] tags
+        # into the TUI output stream.
+        return Console(
+            file=sys.stdout,
+            force_terminal=False,
+            color_system=None,
+            no_color=True,
+            highlight=False,
+            markup=True,
+            soft_wrap=True,
+            legacy_windows=False,
+        )
+    return Console()
+
+
+console = _build_console()
 
 
 # ── Structured JSON logger ────────────────────────────────────────────────────

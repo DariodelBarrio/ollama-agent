@@ -83,7 +83,6 @@ pub struct App {
     pub session: Option<AgentSession>,
     pub last_session_lines: VecDeque<String>,
     pub input_buffer: String,
-    pub input_editing: bool,
     pub session_scroll: u16,
     pub session_follow_output: bool,
     pub models: Vec<InstalledModel>,
@@ -95,8 +94,12 @@ pub struct App {
     pub model_task_running: bool,
     model_task: Option<ModelTask>,
     pending_model_refresh: bool,
+    // These previews are derived from the editable field list. Caching them
+    // avoids rebuilding the launch summary on every frame while navigating.
     pub configure_preview_command: String,
     pub configure_preview_detail: String,
+    // Session metadata is frozen at launch time so the session screen doesn't
+    // rebuild command/path previews while only the live output is changing.
     pub session_command_preview: String,
     pub session_work_dir_preview: String,
 }
@@ -119,7 +122,6 @@ impl App {
             session: None,
             last_session_lines: VecDeque::new(),
             input_buffer: String::new(),
-            input_editing: false,
             session_scroll: 0,
             session_follow_output: true,
             models: vec![],
@@ -226,7 +228,6 @@ impl App {
                 self.session = Some(session);
                 self.screen = Screen::Session;
                 self.input_buffer.clear();
-                self.input_editing = false;
                 self.session_scroll = 0;
                 self.session_follow_output = true;
                 self.set_status("Agente en ejecucion.".into(), false);
@@ -372,6 +373,8 @@ impl App {
     }
 
     pub fn poll_timeout(&self) -> Duration {
+        // Foreground interaction should feel snappy while a session or model
+        // task is active, but the launcher can sleep longer when fully idle.
         if self.session.is_some() || self.model_task_running {
             Duration::from_millis(25)
         } else {
@@ -393,6 +396,8 @@ impl App {
         if lines.is_empty() {
             return "[launcher] No hay salida todavia.".into();
         }
+        // Render only the visible tail/window instead of the whole retained
+        // session history. This keeps redraw cost bounded as logs grow.
         let (start, len) = visible_window_bounds(lines.len(), window, self.session_scroll as usize);
         lines.iter().skip(start).take(len).cloned().collect::<Vec<_>>().join("\n")
     }
@@ -600,48 +605,47 @@ impl App {
     }
 
     fn on_session(&mut self, code: KeyCode, mods: KeyModifiers) {
-        if self.input_editing {
-            match code {
-                KeyCode::Enter => {
-                    let line = self.input_buffer.clone();
-                    let send_result = if let Some(session) = self.session.as_mut() {
-                        session.send_line(&line)
-                    } else {
-                        Err("No hay sesion activa.".into())
-                    };
-                    match send_result {
-                        Ok(()) => {
-                            if let Some(session) = self.session.as_mut() {
-                                session.lines.push_back(format!("> {line}"));
-                            }
-                            self.input_buffer.clear();
-                            self.input_editing = false;
-                            if self.session_follow_output {
-                                self.session_scroll = 0;
-                            }
-                        }
-                        Err(err) => self.set_status(format!("No se pudo enviar entrada: {err}"), true),
-                    }
-                }
-                KeyCode::Esc => self.input_editing = false,
-                KeyCode::Backspace => {
-                    self.input_buffer.pop();
-                }
-                KeyCode::Char(c) => self.input_buffer.push(c),
-                _ => {}
-            }
-            return;
-        }
-
         match code {
-            KeyCode::Char('i') => self.input_editing = true,
             KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => self.stop_session(),
             KeyCode::F(6) => self.stop_session(),
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Enter => {
+                // Session input is always "hot": typing edits the current line
+                // immediately and Enter ships it to the managed Python process.
+                let line = self.input_buffer.trim().to_string();
+                if line.is_empty() {
+                    return;
+                }
+                let send_result = if let Some(session) = self.session.as_mut() {
+                    session.send_line(&line)
+                } else {
+                    Err("No hay sesion activa.".into())
+                };
+                match send_result {
+                    Ok(()) => {
+                        if let Some(session) = self.session.as_mut() {
+                            session.lines.push_back(format!("> {line}"));
+                        }
+                        self.input_buffer.clear();
+                        if self.session_follow_output {
+                            self.session_scroll = 0;
+                        }
+                    }
+                    Err(err) => self.set_status(format!("No se pudo enviar entrada: {err}"), true),
+                }
+            }
+            KeyCode::Backspace => {
+                self.input_buffer.pop();
+            }
+            KeyCode::Char(c) if !mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT) => {
+                self.input_buffer.push(c);
+            }
+            KeyCode::Up => {
+                // Leaving follow mode is explicit: as soon as the user scrolls
+                // up, new output stops forcing the view back to the bottom.
                 self.session_follow_output = false;
                 self.session_scroll = self.session_scroll.saturating_add(1);
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down => {
                 self.session_scroll = self.session_scroll.saturating_sub(1);
                 if self.session_scroll == 0 {
                     self.session_follow_output = true;
@@ -665,7 +669,10 @@ impl App {
                 self.session_scroll = 0;
                 self.session_follow_output = true;
             }
-            KeyCode::Esc => self.screen = Screen::Configure,
+            KeyCode::Esc => {
+                self.input_buffer.clear();
+                self.screen = Screen::Configure;
+            }
             _ => {}
         }
     }
@@ -771,6 +778,8 @@ impl App {
 
     fn push_model_log(&mut self, line: String) {
         if self.model_logs.len() >= MAX_MODEL_LOGS {
+            // Keep a short retained history; long-lived progress spam belongs
+            // in the live progress line, not in an ever-growing log buffer.
             self.model_logs.remove(0);
         }
         self.model_logs.push(line);
@@ -956,6 +965,9 @@ fn visible_window_bounds(total: usize, window: usize, scroll_from_bottom: usize)
     if total == 0 {
         return (0, 0);
     }
+    // Scroll is tracked from the bottom because that matches the default
+    // "follow output" behavior of a terminal session better than top-based
+    // offsets.
     let max_start = total.saturating_sub(window);
     let start = max_start.saturating_sub(scroll_from_bottom.min(max_start));
     let len = (total - start).min(window);
