@@ -39,7 +39,7 @@ class CliSmokeTests(unittest.TestCase):
     def test_install_script_help(self):
         output = self._run_help("scripts/install.py")
         self.assertIn("--hybrid", output)
-        self.assertIn("--mega", output)
+        self.assertNotIn("--mega", output)
 
     def test_benchmark_script_help(self):
         output = self._run_help("scripts/run_benchmark.py")

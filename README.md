@@ -70,7 +70,9 @@ Dependency files:
 
 - [`requirements.txt`](requirements.txt): canonical base dependencies
 - [`requirements-hybrid.txt`](requirements-hybrid.txt): canonical Hybrid dependencies
-- [`requirements-mega.txt`](requirements-mega.txt): legacy alias kept for compatibility
+
+Compatibility aliases still exist for older setups, but they are not part of
+the canonical product story in this repo.
 
 ## Quick Start
 
@@ -237,7 +239,7 @@ What `v0.1.0` means:
 - Benchmark documentation exists, but there are no published benchmark results yet.
 - The project is optimized for terminal workflows, not editor integration.
 - Hybrid memory is local to the machine and not synchronized across environments.
-- `requirements-mega.txt` and `--mega` are legacy aliases; `requirements-hybrid.txt` and `--hybrid` are canonical.
+- some legacy aliases still exist for older setups, but `Hybrid` is the canonical naming.
 
 ## Documentation
 
