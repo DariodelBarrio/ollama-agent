@@ -59,6 +59,7 @@ Hybrid also exposes:
 - local endpoint
 - Groq model
 - optional cloud provider preset (`groq`, `openai`, `openrouter`, `custom`)
+- cloud model presets per provider, plus manual model editing
 - optional cloud endpoint, cloud model, and cloud API key
 - critic mode
 - optional Docker sandbox settings
@@ -158,6 +159,7 @@ rewriting the Python core. The current path is honest and simple:
 
 - choose `Backend = remote` when you want a generic OpenAI-compatible cloud
 - choose `Proveedor cloud` to prefill a known base URL when possible
+- use `Preset cloud` to cycle through known model IDs for that provider
 - set or edit `Modelo cloud`
 - either leave `API key cloud` empty to rely on environment variables, or paste
   a key directly into the profile

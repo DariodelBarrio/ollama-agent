@@ -164,6 +164,11 @@ impl App {
                 f.push(Field::text("URL local", &p.local_url));
                 f.push(Field::select("Backend", &p.backend, vec!["auto", "local", "groq", "remote"]));
                 f.push(Field::select("Proveedor cloud", &p.cloud_provider, CLOUD_PROVIDER_OPTIONS.to_vec()));
+                f.push(Field::select(
+                    "Preset cloud",
+                    cloud_preset_value(&p.cloud_provider, &p.remote_model),
+                    cloud_model_options(&p.cloud_provider),
+                ));
                 f.push(Field::bool("Critic mode", p.critic));
                 f.push(Field::text("Modelo Groq", &p.groq_model));
                 f.push(Field::text("URL cloud", &p.remote_url));
@@ -196,6 +201,11 @@ impl App {
                 "URL local" => self.profile.local_url = f.value.clone(),
                 "Backend" => self.profile.backend = f.value.clone(),
                 "Proveedor cloud" => self.profile.cloud_provider = f.value.clone(),
+                "Preset cloud" => {
+                    if f.value != "custom" {
+                        self.profile.remote_model = f.value.clone();
+                    }
+                }
                 "Critic mode" => self.profile.critic = f.value == "on",
                 "Modelo Groq" => self.profile.groq_model = f.value.clone(),
                 "URL cloud" => self.profile.remote_url = f.value.clone(),
@@ -541,6 +551,9 @@ impl App {
                             let selected_value = f.value.clone();
                             if selected_label == "Proveedor cloud" {
                                 self.apply_cloud_provider_defaults(&selected_value);
+                                self.rebuild_fields();
+                            } else if selected_label == "Preset cloud" {
+                                self.apply_cloud_model_preset(&selected_value);
                             }
                             self.refresh_configure_preview();
                         }
@@ -847,6 +860,11 @@ impl App {
                 "URL local" => preview.local_url = f.value.clone(),
                 "Backend" => preview.backend = f.value.clone(),
                 "Proveedor cloud" => preview.cloud_provider = f.value.clone(),
+                "Preset cloud" => {
+                    if f.value != "custom" {
+                        preview.remote_model = f.value.clone();
+                    }
+                }
                 "Critic mode" => preview.critic = f.value == "on",
                 "Modelo Groq" => preview.groq_model = f.value.clone(),
                 "URL cloud" => preview.remote_url = f.value.clone(),
@@ -884,6 +902,7 @@ impl App {
     fn apply_cloud_provider_defaults(&mut self, provider: &str) {
         let defaults = cloud_provider_defaults(provider);
         if provider == "none" {
+            self.set_field_value("Preset cloud", "custom");
             self.set_field_value("URL cloud", "");
             self.set_field_value("Modelo cloud", "");
             if self.profile.backend == "remote" {
@@ -896,6 +915,7 @@ impl App {
             self.set_field_value("URL cloud", defaults.url);
         }
         if !defaults.model.is_empty() {
+            self.set_field_value("Preset cloud", defaults.model);
             self.set_field_value("Modelo cloud", defaults.model);
         }
         if provider == "groq" {
@@ -908,6 +928,16 @@ impl App {
         }
     }
 
+    fn apply_cloud_model_preset(&mut self, preset: &str) {
+        if preset == "custom" {
+            return;
+        }
+        self.set_field_value("Modelo cloud", preset);
+        if self.profile.backend == "auto" {
+            self.set_field_value("Backend", "remote");
+        }
+    }
+
     fn set_field_value(&mut self, label: &str, value: &str) {
         if let Some(field) = self.fields.iter_mut().find(|field| field.label == label) {
             field.value = value.to_string();
@@ -915,6 +945,7 @@ impl App {
         match label {
             "Backend" => self.profile.backend = value.to_string(),
             "Proveedor cloud" => self.profile.cloud_provider = value.to_string(),
+            "Preset cloud" => {}
             "URL cloud" => self.profile.remote_url = value.to_string(),
             "Modelo cloud" => self.profile.remote_model = value.to_string(),
             "Modelo Groq" => self.profile.groq_model = value.to_string(),
@@ -1071,6 +1102,45 @@ fn hybrid_cloud_summary(profile: &Profile) -> String {
     }
 }
 
+fn cloud_model_options(provider: &str) -> Vec<&'static str> {
+    match provider {
+        "groq" => vec![
+            "llama-3.3-70b-versatile",
+            "llama-3.1-8b-instant",
+            "qwen/qwen3-32b",
+            "moonshotai/kimi-k2-instruct-0905",
+            "openai/gpt-oss-120b",
+            "custom",
+        ],
+        "openai" => vec![
+            "gpt-5.1",
+            "gpt-5",
+            "gpt-5-mini",
+            "gpt-5-nano",
+            "gpt-4.1",
+            "custom",
+        ],
+        "openrouter" => vec![
+            "openrouter/auto",
+            "openai/gpt-5-mini",
+            "openai/gpt-5-nano",
+            "openai/gpt-4.1",
+            "openai/gpt-5.4-mini",
+            "custom",
+        ],
+        _ => vec!["custom"],
+    }
+}
+
+fn cloud_preset_value(provider: &str, remote_model: &str) -> &'static str {
+    for option in cloud_model_options(provider) {
+        if option == remote_model {
+            return option;
+        }
+    }
+    "custom"
+}
+
 fn visible_window_bounds(total: usize, window: usize, scroll_from_bottom: usize) -> (usize, usize) {
     let window = window.max(1);
     if total == 0 {
@@ -1111,7 +1181,10 @@ fn resolve_path_for_display(path: &str, repo_root: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{cloud_provider_defaults, gpu_recommendation, resolve_path_for_display, visible_window_bounds};
+    use super::{
+        cloud_model_options, cloud_preset_value, cloud_provider_defaults, gpu_recommendation,
+        resolve_path_for_display, visible_window_bounds,
+    };
     use crate::config::Variant;
     use std::path::Path;
 
@@ -1157,5 +1230,17 @@ mod tests {
         let defaults = cloud_provider_defaults("groq");
         assert_eq!(defaults.url, "https://api.groq.com/openai/v1");
         assert_eq!(defaults.model, "llama-3.3-70b-versatile");
+    }
+
+    #[test]
+    fn openai_model_options_include_fast_and_strong_variants() {
+        let options = cloud_model_options("openai");
+        assert!(options.contains(&"gpt-5.1"));
+        assert!(options.contains(&"gpt-5-mini"));
+    }
+
+    #[test]
+    fn unknown_cloud_model_maps_to_custom_preset() {
+        assert_eq!(cloud_preset_value("openai", "my-own-model"), "custom");
     }
 }
