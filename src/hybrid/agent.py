@@ -1,10 +1,11 @@
 ﻿"""
 Agente Hybrid de Ollama Agent.
-Motor: SGLang · vLLM · Ollama (local) + Groq (nube)
+Motor: SGLang · vLLM · Ollama (local) + Groq/OpenAI-compatible (nube)
 Router inteligente · self-healing · actor-critico · comandos /slash
 
-Uso: python src/hybrid/agent.py [--model MODEL] [--dir DIR] [--backend local|groq|auto]
-     [--local-url URL] [--groq-model MODEL] [--ctx N] [--temp F] [--critic] [--tag TAG]
+Uso: python src/hybrid/agent.py [--model MODEL] [--dir DIR] [--backend local|groq|remote|auto]
+     [--local-url URL] [--groq-model MODEL] [--remote-url URL] [--remote-model MODEL]
+     [--remote-provider PROVIDER] [--ctx N] [--temp F] [--critic] [--tag TAG]
      [--sandbox docker] [--sandbox-image IMAGE]
 """
 import json, os, re, sys, time, argparse, threading, logging, sqlite3, inspect
@@ -118,7 +119,7 @@ class SmartRouter:
 
     def icon(self, backend: str) -> str:
         """Etiqueta corta usada en la TUI."""
-        return {"local": "⚡ LOCAL", "groq": "☁  GROQ"}.get(backend, backend)
+        return {"local": "⚡ LOCAL", "groq": "☁  GROQ", "remote": "☁  REMOTE"}.get(backend, backend)
 
     def record(self, backend: str):
         if backend in self.calls:
@@ -281,6 +282,22 @@ class MemoryDB:
 # Global — inicializado en Agent.__init__
 _mem: Optional[MemoryDB] = None
 
+REMOTE_PROVIDER_ENVS = {
+    "none": ["REMOTE_API_KEY"],
+    "openai": ["OPENAI_API_KEY", "REMOTE_API_KEY"],
+    "openrouter": ["OPENROUTER_API_KEY", "REMOTE_API_KEY"],
+    "custom": ["REMOTE_API_KEY"],
+}
+
+
+def get_remote_api_key(provider: str) -> str:
+    """Busca una API key usable para el proveedor remoto configurado."""
+    for env_name in REMOTE_PROVIDER_ENVS.get(provider, ["REMOTE_API_KEY"]):
+        value = os.getenv(env_name, "").strip()
+        if value:
+            return value
+    return ""
+
 def save_memory(key: str, value: str, category: str = "fact", importance: int = 5) -> dict:
     """Wrapper de tool para persistir memoria desde llamadas del LLM."""
     if _mem is None: return {"error": "Memoria no inicializada"}
@@ -407,7 +424,7 @@ def print_header(model: str, backend: str, work_dir: str, tag: str, ctx: int, te
 SLASH_HELP = """[bold]Comandos disponibles:[/]
   [bold cyan]/help[/]                    — muestra esta ayuda
   [bold cyan]/clear[/]                   — nueva sesión (borra historial)
-  [bold cyan]/switch [local|groq|auto][/]   — fuerza backend
+  [bold cyan]/switch [local|groq|remote|auto][/]   — fuerza backend
   [bold cyan]/model [nombre][/]          — cambia modelo local o Groq
   [bold cyan]/ctx[/]                     — muestra uso estimado de contexto
   [bold cyan]/cost[/]                    — estadísticas de uso local/groq
@@ -441,6 +458,9 @@ class Agent:
     """Agente híbrido con router de backends, memoria y modo actor-crítico."""
     def __init__(self, model: str, work_dir: str, tag: str, ctx: int, temp: float,
                  local_url: str, groq_model: str, backend: str, critic: bool,
+                 remote_provider: str = "custom",
+                 remote_url: str = "",
+                 remote_model: str = "",
                  system_prompt_path: Optional[str] = None,
                  sandbox: Optional[str] = None,
                  sandbox_image: str = "python:3.12-slim"):
@@ -452,6 +472,9 @@ class Agent:
         self.temp       = temp
         self.local_url  = local_url
         self.groq_model = groq_model
+        self.remote_provider = remote_provider
+        self.remote_url = remote_url
+        self.remote_model = remote_model
         self.critic     = critic
         self.messages: list = []
         self.system_prompt_path = Path(system_prompt_path).resolve() if system_prompt_path else None
@@ -493,6 +516,15 @@ class Agent:
             base_url="https://api.groq.com/openai/v1",
             api_key=groq_key or "NO_KEY",
         ) if groq_key else None
+        remote_key = get_remote_api_key(remote_provider)
+        self.remote_client = OpenAI(
+            base_url=remote_url,
+            api_key=remote_key or "NO_KEY",
+        ) if remote_url and remote_key else None
+        if backend == "remote" and not self.remote_client:
+            console.print(f"[{C_ERR}]  ⚠ Backend remote sin credenciales o URL válida — usando backend local hasta que lo configures.[/]")
+            backend = "local"
+            self.selected_backend = "local"
 
         self.router = SmartRouter(force=None if backend == "auto" else backend)
         self.logger = _make_logger(f"hybrid.{id(self)}", Path(self.work_dir) / "agent_session.jsonl")
@@ -518,12 +550,16 @@ class Agent:
         """Selecciona cliente y modelo efectivos para este turno."""
         if backend == "groq" and self.groq_client:
             return self.groq_client, self.groq_model
+        if backend == "remote" and self.remote_client:
+            return self.remote_client, self.remote_model
         return self.local_client, self.model
 
     def _model_for(self, backend: str) -> str:
         """Devuelve solo el identificador del modelo del backend elegido."""
         if backend == "groq":
             return self.groq_model
+        if backend == "remote":
+            return self.remote_model
         return self.model
 
     def _set_model(self, model_name: str) -> str:
@@ -532,6 +568,9 @@ class Agent:
             self.groq_model = model_name
             self.selected_backend = "groq"
             return f"Modelo cloud cambiado a: {model_name}"
+        if self.selected_backend == "remote":
+            self.remote_model = model_name
+            return f"Modelo remoto cambiado a: {model_name}"
         self.model = model_name
         self.selected_backend = "local"
         return f"Modelo local cambiado a: {model_name}"
@@ -562,7 +601,7 @@ class Agent:
             self.messages = [{"role": "system", "content": system_prompt}]
             console.print(f"[{C_OK}]  ✓ Sesión limpiada[/]")
         elif c == "/switch":
-            if arg in ("local", "groq"):
+            if arg in ("local", "groq", "remote"):
                 self.router.force = arg
                 self.selected_backend = arg
                 console.print(f"[{C_ROUTER}]  ✓ Backend forzado: {self.router.icon(arg)}[/]")
@@ -571,14 +610,21 @@ class Agent:
                 self.selected_backend = None
                 console.print(f"[{C_ROUTER}]  ✓ Router automático activado[/]")
             else:
-                console.print(f"[{C_ERR}]  Uso: /switch [local|groq|auto][/]")
+                console.print(f"[{C_ERR}]  Uso: /switch [local|groq|remote|auto][/]")
         elif c == "/model":
             if arg:
                 msg = self._set_model(arg)
                 console.print(f"[{C_OK}]  ✓ {msg}[/]")
             else:
-                actual = self.groq_model if self.selected_backend == "groq" else self.model
-                origen = "groq" if self.selected_backend == "groq" else "local"
+                if self.selected_backend == "groq":
+                    actual = self.groq_model
+                    origen = "groq"
+                elif self.selected_backend == "remote":
+                    actual = self.remote_model
+                    origen = "remote"
+                else:
+                    actual = self.model
+                    origen = "local"
                 console.print(f"[{C_DIM}]  Modelo actual ({origen}): {actual}[/]")
         elif c == "/ctx":
             chars = sum(len(str(m.get("content",""))) for m in self.messages)
@@ -1146,15 +1192,18 @@ def select_model_menu(local_url: str) -> str:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Agente Hybrid local/Groq para Ollama Agent")
+    parser = argparse.ArgumentParser(description="Agente Hybrid local/cloud para Ollama Agent")
     parser.add_argument("--model",        default=None,                    help="Modelo principal; si coincide con uno de Groq, selecciona Groq salvo override")
     parser.add_argument("--dir",          default=".",                     help="Directorio de trabajo")
     parser.add_argument("--tag",          default="HYBRID",               help="Etiqueta visible en el header")
     parser.add_argument("--ctx",          type=int,   default=32768,       help="Ventana de contexto o presupuesto de tokens del backend local")
     parser.add_argument("--temp",         type=float, default=0.15,        help="Temperatura 0.0-1.0")
-    parser.add_argument("--backend",    default="auto",                     choices=["auto","local","groq"], help="Estrategia de backend: router automático, solo local o solo Groq")
+    parser.add_argument("--backend",    default="auto",                     choices=["auto","local","groq","remote"], help="Estrategia de backend: router automático, solo local, Groq o un proveedor OpenAI-compatible remoto")
     parser.add_argument("--local-url",  default="http://localhost:11434/v1", help="URL OpenAI-compatible del backend local")
     parser.add_argument("--groq-model", default="llama-3.3-70b-versatile",  help="Modelo de respaldo para llamadas a Groq")
+    parser.add_argument("--remote-provider", default="none", choices=["none", "custom", "openai", "openrouter", "groq"], help="Proveedor remoto OpenAI-compatible; define qué env vars probar para la API key")
+    parser.add_argument("--remote-url", default="", help="URL base OpenAI-compatible para backend remoto")
+    parser.add_argument("--remote-model", default="gpt-4.1-mini", help="Modelo para el backend remoto cuando --backend remote")
     parser.add_argument("--critic",       action="store_true",             help="Activar modo Actor-Crítico")
     parser.add_argument("--system-prompt", default=None,
                         help="Ruta de archivo para usar como prompt de sistema")
@@ -1178,6 +1227,9 @@ if __name__ == "__main__":
         model=selected_local_model, work_dir=args.dir, tag=args.tag, ctx=args.ctx, temp=args.temp,
         local_url=args.local_url, groq_model=selected_groq_model,
         backend=selected_backend, critic=args.critic,
+        remote_provider=args.remote_provider,
+        remote_url=args.remote_url,
+        remote_model=args.remote_model,
         system_prompt_path=args.system_prompt,
         sandbox=args.sandbox,
         sandbox_image=args.sandbox_image,

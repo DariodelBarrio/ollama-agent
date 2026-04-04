@@ -46,6 +46,7 @@ It is not a hosted service, not a web GUI, and not a hardened sandbox.
 |---|---|---|
 | Local OpenAI-compatible backend | Yes | Yes |
 | Optional Groq backend | No | Yes |
+| Optional OpenAI-compatible cloud backend | No | Yes |
 | Modes | `code`, `architect`, `research` | Same plus routing, critic workflow, and memory commands |
 | Persistent memory | No | Yes |
 | AST scan | No | Yes |
@@ -112,7 +113,7 @@ Parameter semantics:
 
 - `--ctx` controls the backend token budget or context window hint, not a guaranteed output length.
 - `--api-base` and `--local-url` both mean an OpenAI-compatible local backend endpoint.
-- `--backend` in Hybrid chooses `auto`, `local`, or `groq`.
+- `--backend` in Hybrid chooses `auto`, `local`, `groq`, or `remote`.
 
 ## Usage
 
@@ -142,6 +143,7 @@ In Hybrid:
 - `--model` is the main model selection. If it matches a known Groq model name, the CLI routes accordingly.
 - `--groq-model` is the explicit Groq fallback/override model.
 - `--local-url` is the local OpenAI-compatible endpoint.
+- `--remote-url` and `--remote-model` configure an extra OpenAI-compatible cloud backend when `--backend remote`.
 
 Canonical launch paths in this repo:
 

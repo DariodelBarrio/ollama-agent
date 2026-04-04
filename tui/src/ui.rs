@@ -79,7 +79,7 @@ fn render_statusbar(app: &App, frame: &mut Frame, area: Rect) {
         let hint = match app.screen {
             Screen::MainMenu => "j/k navegar  Enter abrir  q salir",
             Screen::Configure => {
-                "Tab campo  Enter editar  F3 modelos  F4 aplicar preset GPU  F5 lanzar  F2 guardar  Esc volver"
+                "Tab campo  Enter editar  F3 modelos  F4 preset GPU  F5 lanzar  F2 guardar  Esc volver"
             }
             Screen::Models => "j/k navegar  Enter usar  g recomendado  p pull  d borrar  r refrescar  Esc volver",
             Screen::Profiles => "j/k navegar  Enter cargar  d borrar  Esc volver",
@@ -160,7 +160,13 @@ fn render_configure(app: &App, frame: &mut Frame, area: Rect) {
         } else {
             Style::default().fg(Color::White)
         };
-        let value = if field.editing { format!("{}_", field.value) } else { field.value.clone() };
+        let value = if field.editing {
+            format!("{}|", field.value)
+        } else if field.label == "API key cloud" && !field.value.is_empty() {
+            format!("{}{}", "*".repeat(field.value.len().min(8)), " (guardada)")
+        } else {
+            field.value.clone()
+        };
         let value_style = if field.editing {
             Style::default().fg(Color::Black).bg(Color::White)
         } else if focused {

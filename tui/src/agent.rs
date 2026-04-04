@@ -238,6 +238,13 @@ pub fn build_command(profile: &Profile, repo_root: &Path) -> Command {
         Variant::Hybrid => {
             cmd.arg("--backend").arg(&profile.backend);
             cmd.arg("--local-url").arg(&profile.local_url);
+            cmd.arg("--remote-provider").arg(&profile.cloud_provider);
+            if !profile.remote_url.is_empty() {
+                cmd.arg("--remote-url").arg(&profile.remote_url);
+            }
+            if !profile.remote_model.is_empty() {
+                cmd.arg("--remote-model").arg(&profile.remote_model);
+            }
             if !profile.groq_model.is_empty() {
                 cmd.arg("--groq-model").arg(&profile.groq_model);
             }
@@ -247,6 +254,16 @@ pub fn build_command(profile: &Profile, repo_root: &Path) -> Command {
             if !profile.sandbox.trim().is_empty() {
                 cmd.arg("--sandbox").arg(&profile.sandbox);
                 cmd.arg("--sandbox-image").arg(&profile.sandbox_image);
+            }
+            if !profile.remote_api_key.trim().is_empty() {
+                match profile.cloud_provider.as_str() {
+                    "groq" => {
+                        cmd.env("GROQ_API_KEY", &profile.remote_api_key);
+                    }
+                    _ => {
+                        cmd.env("REMOTE_API_KEY", &profile.remote_api_key);
+                    }
+                };
             }
             cmd.env("OLLAMA_AGENT_SIMPLE_INPUT", "1");
         }

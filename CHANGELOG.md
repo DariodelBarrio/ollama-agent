@@ -11,6 +11,7 @@ The format is intentionally simple for now.
 - direct-input session flow in the TUI, without a separate "press `i`" mode
 - TUI-side UTF-8 process environment handling for managed Python sessions on Windows
 - TUI render caching and output-windowing to reduce redraw and string rebuild cost
+- Hybrid launcher support for an extra OpenAI-compatible cloud backend with provider presets and optional inline API keys
 
 ### Changed
 

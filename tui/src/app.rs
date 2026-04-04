@@ -68,6 +68,7 @@ pub const MENU_LEN: usize = 5;
 const MAX_MODEL_LOGS: usize = 24;
 const GPU_OPTIONS: [&str; 5] = ["custom", "5060", "5070", "5080", "5090"];
 const GPU_PRESET_OPTIONS: [&str; 3] = ["safe", "balanced", "max"];
+const CLOUD_PROVIDER_OPTIONS: [&str; 5] = ["none", "groq", "openai", "openrouter", "custom"];
 
 pub struct App {
     pub screen: Screen,
@@ -161,9 +162,13 @@ impl App {
             }
             Variant::Hybrid => {
                 f.push(Field::text("URL local", &p.local_url));
-                f.push(Field::select("Backend", &p.backend, vec!["auto", "local", "groq"]));
+                f.push(Field::select("Backend", &p.backend, vec!["auto", "local", "groq", "remote"]));
+                f.push(Field::select("Proveedor cloud", &p.cloud_provider, CLOUD_PROVIDER_OPTIONS.to_vec()));
                 f.push(Field::bool("Critic mode", p.critic));
                 f.push(Field::text("Modelo Groq", &p.groq_model));
+                f.push(Field::text("URL cloud", &p.remote_url));
+                f.push(Field::text("Modelo cloud", &p.remote_model));
+                f.push(Field::text("API key cloud", &p.remote_api_key));
                 f.push(Field::select("Sandbox", profile_select_value(&p.sandbox), vec!["off", "docker"]));
                 f.push(Field::text("Sandbox image", &p.sandbox_image));
             }
@@ -190,8 +195,12 @@ impl App {
                 "API base" => self.profile.api_base = f.value.clone(),
                 "URL local" => self.profile.local_url = f.value.clone(),
                 "Backend" => self.profile.backend = f.value.clone(),
+                "Proveedor cloud" => self.profile.cloud_provider = f.value.clone(),
                 "Critic mode" => self.profile.critic = f.value == "on",
                 "Modelo Groq" => self.profile.groq_model = f.value.clone(),
+                "URL cloud" => self.profile.remote_url = f.value.clone(),
+                "Modelo cloud" => self.profile.remote_model = f.value.clone(),
+                "API key cloud" => self.profile.remote_api_key = f.value.clone(),
                 "Sandbox" => {
                     self.profile.sandbox = if f.value == "off" { String::new() } else { f.value.clone() }
                 }
@@ -528,6 +537,11 @@ impl App {
                         FieldKind::Select(opts) => {
                             let current = opts.iter().position(|&o| o == f.value).unwrap_or(0);
                             f.value = opts[(current + 1) % opts.len()].to_string();
+                            let selected_label = f.label;
+                            let selected_value = f.value.clone();
+                            if selected_label == "Proveedor cloud" {
+                                self.apply_cloud_provider_defaults(&selected_value);
+                            }
                             self.refresh_configure_preview();
                         }
                         _ => f.editing = true,
@@ -832,8 +846,12 @@ impl App {
                 "API base" => preview.api_base = f.value.clone(),
                 "URL local" => preview.local_url = f.value.clone(),
                 "Backend" => preview.backend = f.value.clone(),
+                "Proveedor cloud" => preview.cloud_provider = f.value.clone(),
                 "Critic mode" => preview.critic = f.value == "on",
                 "Modelo Groq" => preview.groq_model = f.value.clone(),
+                "URL cloud" => preview.remote_url = f.value.clone(),
+                "Modelo cloud" => preview.remote_model = f.value.clone(),
+                "API key cloud" => preview.remote_api_key = f.value.clone(),
                 "Sandbox" => preview.sandbox = if f.value == "off" { String::new() } else { f.value.clone() },
                 "Sandbox image" => preview.sandbox_image = f.value.clone(),
                 _ => {}
@@ -852,13 +870,56 @@ impl App {
                 gpu_recommendation_summary_for(&preview)
             ),
             Variant::Hybrid => format!(
-                "backend: {}  critic: {}  sandbox: {}  {}",
+                "backend: {}  cloud: {}  key: {}  critic: {}  sandbox: {}  {}",
                 preview.backend,
+                hybrid_cloud_summary(&preview),
+                if preview.remote_api_key.trim().is_empty() { "env/off" } else { "inline" },
                 if preview.critic { "on" } else { "off" },
                 if preview.sandbox.is_empty() { "off" } else { &preview.sandbox },
                 gpu_recommendation_summary_for(&preview)
             ),
         };
+    }
+
+    fn apply_cloud_provider_defaults(&mut self, provider: &str) {
+        let defaults = cloud_provider_defaults(provider);
+        if provider == "none" {
+            self.set_field_value("URL cloud", "");
+            self.set_field_value("Modelo cloud", "");
+            if self.profile.backend == "remote" {
+                self.set_field_value("Backend", "auto");
+            }
+            return;
+        }
+
+        if !defaults.url.is_empty() {
+            self.set_field_value("URL cloud", defaults.url);
+        }
+        if !defaults.model.is_empty() {
+            self.set_field_value("Modelo cloud", defaults.model);
+        }
+        if provider == "groq" {
+            self.set_field_value("Modelo Groq", defaults.model);
+            if self.profile.backend == "remote" || self.profile.backend == "auto" {
+                self.set_field_value("Backend", "groq");
+            }
+        } else if self.profile.backend == "groq" || self.profile.backend == "auto" {
+            self.set_field_value("Backend", "remote");
+        }
+    }
+
+    fn set_field_value(&mut self, label: &str, value: &str) {
+        if let Some(field) = self.fields.iter_mut().find(|field| field.label == label) {
+            field.value = value.to_string();
+        }
+        match label {
+            "Backend" => self.profile.backend = value.to_string(),
+            "Proveedor cloud" => self.profile.cloud_provider = value.to_string(),
+            "URL cloud" => self.profile.remote_url = value.to_string(),
+            "Modelo cloud" => self.profile.remote_model = value.to_string(),
+            "Modelo Groq" => self.profile.groq_model = value.to_string(),
+            _ => {}
+        }
     }
 }
 
@@ -960,6 +1021,56 @@ fn profile_select_value(value: &str) -> &str {
     }
 }
 
+struct CloudProviderDefaults {
+    url: &'static str,
+    model: &'static str,
+}
+
+fn cloud_provider_defaults(provider: &str) -> CloudProviderDefaults {
+    match provider {
+        "groq" => CloudProviderDefaults {
+            url: "https://api.groq.com/openai/v1",
+            model: "llama-3.3-70b-versatile",
+        },
+        "openai" => CloudProviderDefaults {
+            url: "https://api.openai.com/v1",
+            model: "gpt-4.1-mini",
+        },
+        "openrouter" => CloudProviderDefaults {
+            url: "https://openrouter.ai/api/v1",
+            model: "openai/gpt-4.1-mini",
+        },
+        "custom" => CloudProviderDefaults {
+            url: "",
+            model: "",
+        },
+        _ => CloudProviderDefaults {
+            url: "",
+            model: "",
+        },
+    }
+}
+
+fn hybrid_cloud_summary(profile: &Profile) -> String {
+    match profile.backend.as_str() {
+        "groq" => format!("groq/{}", profile.groq_model),
+        "remote" => {
+            let provider = if profile.cloud_provider.trim().is_empty() {
+                "custom"
+            } else {
+                &profile.cloud_provider
+            };
+            let model = if profile.remote_model.trim().is_empty() {
+                "(sin modelo)"
+            } else {
+                &profile.remote_model
+            };
+            format!("{provider}/{model}")
+        }
+        _ => profile.cloud_provider.clone(),
+    }
+}
+
 fn visible_window_bounds(total: usize, window: usize, scroll_from_bottom: usize) -> (usize, usize) {
     let window = window.max(1);
     if total == 0 {
@@ -1000,7 +1111,7 @@ fn resolve_path_for_display(path: &str, repo_root: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{gpu_recommendation, resolve_path_for_display, visible_window_bounds};
+    use super::{cloud_provider_defaults, gpu_recommendation, resolve_path_for_display, visible_window_bounds};
     use crate::config::Variant;
     use std::path::Path;
 
@@ -1032,5 +1143,19 @@ mod tests {
     #[test]
     fn visible_window_scrolls_up_from_bottom() {
         assert_eq!(visible_window_bounds(10, 4, 2), (4, 4));
+    }
+
+    #[test]
+    fn openai_provider_defaults_fill_known_endpoint() {
+        let defaults = cloud_provider_defaults("openai");
+        assert_eq!(defaults.url, "https://api.openai.com/v1");
+        assert_eq!(defaults.model, "gpt-4.1-mini");
+    }
+
+    #[test]
+    fn groq_provider_defaults_keep_groq_model() {
+        let defaults = cloud_provider_defaults("groq");
+        assert_eq!(defaults.url, "https://api.groq.com/openai/v1");
+        assert_eq!(defaults.model, "llama-3.3-70b-versatile");
     }
 }

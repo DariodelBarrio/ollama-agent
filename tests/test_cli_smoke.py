@@ -35,6 +35,8 @@ class CliSmokeTests(unittest.TestCase):
         output = self._run_help("src/hybrid/agent.py")
         self.assertIn("--backend", output)
         self.assertIn("--critic", output)
+        self.assertIn("--remote-url", output)
+        self.assertIn("--remote-model", output)
 
     def test_install_script_help(self):
         output = self._run_help("scripts/install.py")

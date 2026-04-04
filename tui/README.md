@@ -55,9 +55,11 @@ Both variants expose:
 
 Hybrid also exposes:
 
-- backend (`auto`, `local`, `groq`)
+- backend (`auto`, `local`, `groq`, `remote`)
 - local endpoint
 - Groq model
+- optional cloud provider preset (`groq`, `openai`, `openrouter`, `custom`)
+- optional cloud endpoint, cloud model, and cloud API key
 - critic mode
 - optional Docker sandbox settings
 
@@ -148,6 +150,27 @@ Current session controls:
 
 The session view follows live output by default. Scrolling up pauses follow
 mode; `End` jumps back to the bottom and resumes it.
+
+## Hybrid Cloud Providers
+
+The TUI can configure `Hybrid` against an extra cloud provider without
+rewriting the Python core. The current path is honest and simple:
+
+- choose `Backend = remote` when you want a generic OpenAI-compatible cloud
+- choose `Proveedor cloud` to prefill a known base URL when possible
+- set or edit `Modelo cloud`
+- either leave `API key cloud` empty to rely on environment variables, or paste
+  a key directly into the profile
+
+Current provider presets:
+
+- `groq`: uses `GROQ_API_KEY`
+- `openai`: uses `OPENAI_API_KEY` or `REMOTE_API_KEY`
+- `openrouter`: uses `OPENROUTER_API_KEY` or `REMOTE_API_KEY`
+- `custom`: expects `REMOTE_API_KEY` unless you paste one inline
+
+There is no OAuth-style "login with ChatGPT" flow in the launcher today. The
+real integration path is API-key based.
 
 ## Practical Limits
 
