@@ -276,6 +276,49 @@ def extract_tool_calls_from_text(raw_text: str) -> list[dict]:
     return []
 
 
+# ── File-creation intent detection ───────────────────────────────────────────
+
+# A path-like token containing a recognised source-code / config extension.
+_INTENT_PATH_RE = re.compile(
+    r'[\w./\\-]+\.(py|js|ts|jsx|tsx|rb|go|java|c|cpp|h|hpp|rs|sh|bash|'
+    r'md|txt|json|yaml|yml|toml|html|css|sql|env|cfg|ini|conf)',
+    re.IGNORECASE,
+)
+
+# Explicit creation phrases in Spanish and English.
+_INTENT_PHRASE_RE = re.compile(
+    r'\b('
+    r'cr[eé]a(?:r|me)?\s+(?:un\s+|el\s+|una\s+)?(?:script|archivo|fichero|programa|m[oó]dulo|clase|funci[oó]n|test|app)\b'
+    r'|hazme\s+(?:un\s+|una\s+)?(?:script|archivo|fichero|programa|test)\b'
+    r'|gu[aá]rdal[oa]\s+en\b'
+    r'|ponl[oa]\s+en\b'
+    r'|escr[ií]bel[oa]\s+(?:en|a)\b'
+    r'|create\s+(?:a\s+|the\s+)?(?:script|file|program|module|class|function|test|app)\b'
+    r'|write\s+(?:a\s+|the\s+)?(?:script|file|program|module|class|function)\b'
+    r'|save\s+(?:it\s+)?(?:to|in|at)\b'
+    r'|put\s+it\s+(?:in|to|at)\b'
+    r')',
+    re.IGNORECASE,
+)
+
+
+def detect_file_creation_intent(user_input: str) -> bool:
+    """Return True when the user message clearly requests a file to be created.
+
+    Uses two complementary signals:
+    - an explicit file path with a recognised extension (e.g. ``scripts/test.py``)
+    - a creation-verb + file-noun phrase in Spanish or English
+
+    Kept deliberately simple to avoid false positives on ordinary conversation.
+    """
+    text = user_input or ""
+    if _INTENT_PATH_RE.search(text):
+        return True
+    if _INTENT_PHRASE_RE.search(text):
+        return True
+    return False
+
+
 # ── UI helpers ────────────────────────────────────────────────────────────────
 _TOOL_LABELS: dict = {
     "edit_file":        ("Update",    "path"),

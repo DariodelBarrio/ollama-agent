@@ -324,5 +324,225 @@ class ToolCallRecoveryTests(unittest.TestCase):
         self.assertEqual(result[0]["arguments"]["path"], "demo")
 
 
+# ── detect_file_creation_intent ───────────────────────────────────────────────
+class FileCreationIntentTests(unittest.TestCase):
+    """Unit tests for the lightweight file-creation intent heuristic."""
+
+    def _pos(self, text):
+        """Assert True (should be detected as file-creation intent)."""
+        self.assertTrue(
+            base_agent.detect_file_creation_intent(text),
+            msg=f"Expected file-creation intent for: {text!r}",
+        )
+
+    def _neg(self, text):
+        """Assert False (should NOT be detected as file-creation intent)."""
+        self.assertFalse(
+            base_agent.detect_file_creation_intent(text),
+            msg=f"Expected NO file-creation intent for: {text!r}",
+        )
+
+    # --- positive cases ---
+
+    def test_explicit_path_py(self):
+        self._pos("crea un script en scripts/test.py")
+
+    def test_explicit_path_js(self):
+        self._pos("hazme un archivo en src/index.js")
+
+    def test_explicit_path_only(self):
+        # Path with extension is alone a sufficient signal.
+        self._pos("ponlo en utils/helpers.py")
+
+    def test_spanish_verb_archivo(self):
+        self._pos("créame un archivo en esa carpeta")
+
+    def test_spanish_verb_script(self):
+        self._pos("crea un script que lea el CSV")
+
+    def test_spanish_guardar(self):
+        self._pos("guárdalo en la carpeta scripts")
+
+    def test_english_create_file(self):
+        self._pos("create a file called app.py")
+
+    def test_english_write_script(self):
+        self._pos("write a script that parses JSON")
+
+    def test_english_save_to(self):
+        self._pos("save it to data/output.csv")
+
+    def test_yaml_extension(self):
+        self._pos("genera un docker-compose.yml en el directorio raíz")
+
+    def test_json_extension(self):
+        self._pos("crea config/settings.json con estas claves")
+
+    # --- negative cases ---
+
+    def test_greeting_no_intent(self):
+        self._neg("hola, ¿cómo estás?")
+
+    def test_explain_code_no_intent(self):
+        self._neg("explícame qué hace esta función")
+
+    def test_show_code_no_intent(self):
+        self._neg("muéstrame un ejemplo de cómo usar argparse")
+
+    def test_question_no_intent(self):
+        self._neg("¿qué es un decorador en Python?")
+
+    def test_version_number_no_false_positive(self):
+        # "3.10" should not match a source-file extension.
+        self._neg("necesito usar Python 3.10 para este proyecto")
+
+    def test_run_tests_no_intent(self):
+        self._neg("ejecuta los tests y dime si pasan")
+
+
+# ── File-creation recovery (agent loop) ──────────────────────────────────────
+class FileCreationRecoveryTests(unittest.TestCase):
+    """Integration-style tests for the agent's file-creation recovery path.
+
+    The agent's ``_stream_response`` is mocked so we can simulate a model that
+    first returns plain text (no tool call) and then calls write_file on the
+    second turn after the recovery nudge.
+    """
+
+    def setUp(self):
+        self._tmp_root = ROOT / ".tmp-tests"
+        self._tmp_root.mkdir(exist_ok=True)
+        self._tmp = self._tmp_root / f"fc-recovery-{uuid.uuid4().hex}"
+        self._tmp.mkdir()
+        base_agent.sync_work_dir(str(self._tmp))
+
+    def tearDown(self):
+        base_agent.sync_work_dir(str(ROOT))
+        shutil.rmtree(self._tmp_root, ignore_errors=True)
+
+    def _make_agent(self):
+        """Construct a local Agent without hitting the network."""
+        import agent as local_agent_module
+        agent = local_agent_module.Agent.__new__(local_agent_module.Agent)
+        agent.model       = "mock-model"
+        agent.work_dir    = str(self._tmp)
+        agent.tag         = "TEST"
+        agent.num_ctx     = 4096
+        agent.temperature = 0.1
+        agent.api_base    = "http://localhost:11434/v1"
+        agent.current_mode = "code"
+        agent.messages    = [{"role": "system", "content": "test"}]
+        agent.system_prompt_path = None
+
+        log_path = self._tmp / "test_session.jsonl"
+        agent.logger = base_agent.make_logger(f"test.{id(agent)}", log_path)
+
+        base_agent.sync_work_dir(str(self._tmp))
+        return agent
+
+    def test_recovery_forces_write_file_after_plain_text(self):
+        """When the model returns plain text first, recovery injects a nudge and
+        the second call must produce a write_file tool call that creates the file."""
+        import agent as local_agent_module
+
+        target = self._tmp / "scripts" / "test.py"
+        content = "print('hello')\n"
+
+        call_count = [0]
+
+        def mock_stream_response(messages, tools):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # First call: model returns plain code text, no tool call.
+                return "Aquí está el código:\n```python\nprint('hello')\n```", []
+            elif call_count[0] == 2:
+                # Second call (after recovery nudge): model uses write_file.
+                return "", [{
+                    "id": "tc-1",
+                    "name": "write_file",
+                    "arguments": {"path": "scripts/test.py", "content": content},
+                }]
+            else:
+                # Third call: model confirms completion with plain text.
+                return "Archivo creado correctamente.", []
+
+        agent = self._make_agent()
+        # Simulate the agent loop body for a single user turn.
+        user_input = "crea un script en scripts/test.py"
+        agent.messages.append({"role": "user", "content": user_input})
+
+        _file_intent   = base_agent.detect_file_creation_intent(user_input)
+        _file_created  = False
+        _recovery_done = False
+
+        self.assertTrue(_file_intent, "Intent should be detected")
+
+        import json as _json
+        TOOL_MAP = base_agent.BASE_TOOL_MAP
+
+        for _iteration in range(5):  # safety cap
+            full_content, tool_calls = mock_stream_response(agent.messages, [])
+
+            if tool_calls:
+                agent.messages.append({
+                    "role": "assistant",
+                    "content": full_content or None,
+                    "tool_calls": [
+                        {"id": tc["id"], "type": "function",
+                         "function": {"name": tc["name"],
+                                      "arguments": _json.dumps(tc["arguments"])}}
+                        for tc in tool_calls
+                    ],
+                })
+                for tc in tool_calls:
+                    fn_name = tc["name"]
+                    fn_args = tc["arguments"]
+                    result = TOOL_MAP[fn_name](**fn_args)
+                    if fn_name == "write_file" and "error" not in result:
+                        _file_created = True
+                    agent.messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "content": _json.dumps(result, ensure_ascii=False),
+                    })
+            else:
+                agent.messages.append({"role": "assistant", "content": full_content})
+                if _file_intent and not _file_created and not _recovery_done:
+                    _recovery_done = True
+                    recovery = (
+                        "No creaste el archivo — respondiste con texto. "
+                        "Usa write_file() ahora para crear el archivo en la ruta que indicó el usuario. "
+                        "Si el directorio no existe dentro del workspace, usa create_directory() primero."
+                    )
+                    agent.messages.append({"role": "user", "content": recovery})
+                    continue
+                break
+
+        self.assertTrue(target.exists(), f"File should exist at {target}")
+        self.assertEqual(target.read_text(encoding="utf-8"), content)
+        self.assertTrue(_file_created)
+        self.assertEqual(call_count[0], 3, "Should have called _stream_response 3 times (plain text → recovery → write_file → confirmation)")
+
+    def test_no_recovery_for_conversational_reply(self):
+        """A normal conversational user turn must not trigger the recovery path."""
+        _file_intent = base_agent.detect_file_creation_intent("¿qué es un decorador en Python?")
+        self.assertFalse(_file_intent)
+        # No recovery would be triggered since intent is False.
+
+    def test_path_safety_still_holds_on_write(self):
+        """write_file must not create files outside the workspace even during recovery."""
+        outside = str(self._tmp_root.parent / "outside.py")
+        result = base_agent.write_file(outside, "evil")
+        self.assertIn("error", result)
+
+    def test_explicit_path_request_lands_in_correct_dir(self):
+        """write_file with a subdirectory path auto-creates the directory."""
+        result = base_agent.write_file("subdir/app.js", "console.log('ok');\n")
+        self.assertIn("success", result)
+        expected = self._tmp / "subdir" / "app.js"
+        self.assertTrue(expected.exists())
+        self.assertIn("ok", expected.read_text())
+
+
 if __name__ == "__main__":
     unittest.main()

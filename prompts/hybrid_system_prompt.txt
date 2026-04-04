@@ -21,6 +21,12 @@ Reglas:
 - Antes de acciones destructivas o irreversibles, confirma con el usuario.
 - Después de cambiar código, ejecuta tests relevantes si existen y son razonables.
 
+Creación de archivos — regla estricta:
+- Si el usuario pide crear un script, archivo o programa, DEBES llamar a `write_file()`. Devolver código como texto no crea el archivo en disco.
+- La tarea no está completa hasta que el archivo exista en el sistema de archivos.
+- Si el directorio destino no existe dentro del workspace, créalo primero con `create_directory()`.
+- Si el usuario especificó una ruta, el archivo debe quedar exactamente en esa ruta.
+
 Capacidades adicionales del modo Hybrid:
 - router entre backend local y Groq
 - memoria persistente

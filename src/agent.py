@@ -34,6 +34,7 @@ from base_agent import (
     BASE_TOOL_MAP as TOOL_MAP,
     BASE_TOOLS as TOOLS,
     extract_tool_calls_from_text,
+    detect_file_creation_intent,
     # UI
     _render_inline, _TOOL_LABELS, _rel,
     print_tool_call, print_tool_result,
@@ -531,6 +532,11 @@ class Agent:
             self.logger.info("Mensaje del usuario", extra={"user_input": user_input})
             self.messages.append({"role": "user", "content": user_input})
 
+            # File-creation post-condition tracking
+            _file_intent    = detect_file_creation_intent(user_input)
+            _file_created   = False
+            _recovery_done  = False
+
             while True:
                 trimmed = self._trim_history()
                 full_content, tool_calls = self._stream_response(trimmed, TOOLS)
@@ -584,6 +590,9 @@ class Agent:
                                         "Herramienta devolvió error",
                                         extra={"tool_name": fn_name, "error_details": result["error"]}
                                     )
+                                # Track successful file creation
+                                if fn_name == "write_file" and "error" not in result:
+                                    _file_created = True
                         else:
                             result = {"error": f"Tool desconocida: {fn_name}"}
                             self.logger.error("Tool desconocida",
@@ -597,6 +606,22 @@ class Agent:
                         })
                 else:
                     self.messages.append({"role": "assistant", "content": full_content})
+                    # Recovery: if user asked for a file but none was created and
+                    # the model just returned plain text, give it one explicit nudge.
+                    if _file_intent and not _file_created and not _recovery_done:
+                        _recovery_done = True
+                        recovery = (
+                            "No creaste el archivo — respondiste con texto. "
+                            "Usa write_file() ahora para crear el archivo en la ruta que indicó el usuario. "
+                            "Si el directorio no existe dentro del workspace, usa create_directory() primero."
+                        )
+                        self.messages.append({"role": "user", "content": recovery})
+                        console.print(f"[{C_DIM}]  ↺ El modelo no usó write_file() — reintentando...[/]")
+                        self.logger.warning(
+                            "Recuperación file-creation: modelo devolvió texto sin write_file()",
+                            extra={"tool_args": {"user_input": user_input[:200]}},
+                        )
+                        continue
                     break
 
 
