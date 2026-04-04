@@ -1,6 +1,6 @@
-# TUI Launcher (`oat`)
+# TUI Launcher (`kdex`)
 
-`oat` is the terminal-first launcher and session manager for Ollama Agent.
+`kdex` is the terminal-first launcher and session manager for Ollama Agent.
 It does not replace the Python agents. It wraps the existing entry points and
 keeps the runtime logic in Python.
 
@@ -37,7 +37,7 @@ The TUI has three layers:
 3. local model management in `src/models.rs`
 4. terminal UI and navigation in `src/app.rs` + `src/ui.rs`
 
-The Python agents remain the execution core. `oat` only builds the command,
+The Python agents remain the execution core. `kdex` only builds the command,
 spawns the process, forwards input, and renders output.
 
 ## Supported Parameters
@@ -82,7 +82,7 @@ cargo build --release
 Binary output:
 
 - Linux/macOS: `tui/target/release/oat`
-- Windows: `tui\target\release\oat.exe`
+- Windows: `tui\target\release\kdex.exe`
 
 Legacy Windows launchers are not part of this repository. Use the separate
 Windows compatibility repository if you want the `.bat` workflow.
@@ -92,15 +92,15 @@ Windows compatibility repository if you want the `.bat` workflow.
 From the repository root:
 
 ```bash
-./tui/target/release/oat
-oat.exe
+./tui/target/release/kdex
+kdex.exe
 ```
 
 From outside the repository:
 
 ```bash
-OLLAMA_AGENT_ROOT=/path/to/repo oat
-set OLLAMA_AGENT_ROOT=C:\path\to\repo && oat.exe
+OLLAMA_AGENT_ROOT=/path/to/repo kdex
+set OLLAMA_AGENT_ROOT=C:\path\to\repo && kdex.exe
 ```
 
 ## Model Management
@@ -135,7 +135,7 @@ added later.
 
 ## Session Model
 
-`oat` launches the selected Python agent as a child process and keeps the user
+`kdex` launches the selected Python agent as a child process and keeps the user
 inside one terminal UI.
 
 Current session controls:
@@ -180,7 +180,7 @@ This is an early launcher, not a full terminal multiplexer.
 
 - input forwarding is line-based
 - the integrated session does not try to preserve `prompt_toolkit` features
-- `Hybrid` runs in a simplified input mode when launched from `oat`
+- `Hybrid` runs in a simplified input mode when launched from `kdex`
 - stopping a session kills the child process; it is not a graceful in-agent shutdown
 
 Those limits are deliberate for now: the TUI manages the current Python core
@@ -207,7 +207,7 @@ GPU recommendation limits:
 
 | Variable | Purpose |
 |---|---|
-| `OLLAMA_AGENT_ROOT` | Repository path when `oat` starts outside the repo |
+| `OLLAMA_AGENT_ROOT` | Repository path when `kdex` starts outside the repo |
 | `GROQ_API_KEY` | Required for Hybrid runs that route to Groq |
-| `PYTHONUNBUFFERED` | Set automatically by `oat` for live output |
-| `OLLAMA_AGENT_SIMPLE_INPUT` | Set automatically by `oat` for managed Local and Hybrid sessions |
+| `PYTHONUNBUFFERED` | Set automatically by `kdex` for live output |
+| `OLLAMA_AGENT_SIMPLE_INPUT` | Set automatically by `kdex` for managed Local and Hybrid sessions |

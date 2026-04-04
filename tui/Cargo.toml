@@ -5,7 +5,7 @@ edition = "2021"
 description = "Terminal launcher for ollama-agent (local and hybrid variants)"
 
 [[bin]]
-name = "oat"          # ollama-agent tui
+name = "kdex"
 path = "src/main.rs"
 
 [dependencies]
