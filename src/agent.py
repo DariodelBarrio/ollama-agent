@@ -27,7 +27,7 @@ from base_agent import (
     # logger
     _JsonFmt, make_logger as _make_logger,
     # tool runtime
-    sync_work_dir, get_work_dir,
+    sync_work_dir, get_work_dir, build_agent_tools,
     run_command, read_file, write_file, edit_file, find_files, grep,
     list_directory, delete_file, create_directory, move_file,
     search_web, fetch_url, change_directory,
@@ -36,7 +36,18 @@ from base_agent import (
     extract_tool_calls_from_text,
     detect_file_creation_intent,
     extract_candidate_paths,
+    get_workspace_placeholder_targets,
     resolve_in_workspace,
+    should_plan_task,
+    should_verify_task,
+    should_run_critic,
+    requested_test_validation,
+    emit_role_event,
+    emit_role_result,
+    summarize_text,
+    snapshot_workspace_files,
+    verify_workspace_changes,
+    build_recovery_instruction,
     # UI
     _render_inline, _TOOL_LABELS, _rel,
     print_tool_call, print_tool_result,
@@ -77,11 +88,12 @@ LOGO_LINES = [
 SIMPLE_INPUT = os.getenv("OLLAMA_AGENT_SIMPLE_INPUT", "").strip().lower() in {"1", "true", "yes"}
 
 
-def print_header(model: str, work_dir: str, tag: str, num_ctx: int, temperature: float):
+def print_header(model: str, work_dir: str, tag: str, num_ctx: int, temperature: float, read_only: bool = False):
     if SIMPLE_INPUT:
         console.print()
         console.print(f"[bold]{tag}[/]  {model}")
-        console.print(f"[{C_DIM}]ctx:{num_ctx}  temp:{temperature}  {work_dir}[/]")
+        mode = "  read-only" if read_only else ""
+        console.print(f"[{C_DIM}]ctx:{num_ctx}  temp:{temperature}{mode}  {work_dir}[/]")
         console.print(f"[{C_DIM}]Escribe y pulsa Enter. 'salir' termina. 'limpiar' reinicia.[/]")
         console.print(f"[{C_BORDER}]" + ("-" * 72) + "[/]")
         console.print()
@@ -121,7 +133,7 @@ def get_input(color: str = C_PROMPT) -> str:
 # ── Prompts ───────────────────────────────────────────────────────────────────
 def build_system_prompt(work_dir: str, project_context: str,
                         mode: str = "", mode_snippet: str = "") -> str:
-    desktop = str(Path.home() / "Desktop")
+    placeholder_targets = get_workspace_placeholder_targets()
     mode_section = ""
     if mode and mode_snippet:
         mode_section = (
@@ -138,7 +150,9 @@ def build_system_prompt(work_dir: str, project_context: str,
             f"Eres un agente autónomo de programación. Directorio de trabajo: {work_dir}\n"
             "Responde en español y usa herramientas para completar tareas.\n"
         ),
-        desktop=desktop,
+        desktop=placeholder_targets["desktop"],
+        documents=placeholder_targets["documents"],
+        workspace=placeholder_targets["workspace"],
         project_context=project_context,
         mode_section=mode_section,
     )
@@ -190,7 +204,9 @@ class Agent:
     def __init__(self, model: str, work_dir: str, tag: str,
                  num_ctx: int, temperature: float,
                  api_base: str = "http://localhost:11434/v1",
-                 system_prompt_path: Optional[str] = None):
+                 system_prompt_path: Optional[str] = None,
+                 read_only: bool = False,
+                 guided_mode: bool = False):
         self.model        = model
         self.work_dir     = str(Path(work_dir).resolve())
         self.tag          = tag
@@ -198,12 +214,16 @@ class Agent:
         self.temperature  = temperature
         self.api_base     = api_base
         self.current_mode = "code"
+        self.read_only    = read_only
+        self.guided_mode  = guided_mode
+        self.max_recovery_attempts = 2
         self.client       = OpenAI(base_url=api_base, api_key="sk-no-key-required")
         self.messages: list = []
         self.system_prompt_path = Path(system_prompt_path).resolve() if system_prompt_path else None
 
         # Sync shared tool runtime to this agent's work directory
-        sync_work_dir(self.work_dir)
+        sync_work_dir(self.work_dir, read_only=read_only)
+        self.tools = build_agent_tools(include_web=True, read_only=read_only)
 
         log_path = Path(self.work_dir) / "agent_session.jsonl"
         self.logger = _make_logger(f"agent.{id(self)}", log_path)
@@ -459,6 +479,84 @@ class Agent:
         except Exception:
             return True
 
+    def _role_subcall(self, role: str, prompt: str, max_tokens: int = 260) -> str:
+        role_prompts = {
+            "planner": (
+                "Eres PLANNER. Devuelve un plan breve y accionable en español. "
+                "Incluye solo: artefactos, tools probables, validación y riesgo principal."
+            ),
+            "critic": (
+                "Eres CRITIC. Revisa el resultado con dureza técnica pero brevemente. "
+                "Si está bien responde solo '✓ Sin problemas.'. Si no, da hasta 3 hallazgos concretos."
+            ),
+            "recovery": (
+                "Eres FIXER. Devuelve una única instrucción de reintento, concreta y distinta del intento fallido."
+            ),
+        }
+        try:
+            resp = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": role_prompts[role]},
+                    {"role": "user", "content": prompt},
+                ],
+                stream=False,
+                temperature=0.1,
+                max_tokens=max_tokens,
+            )
+            return (resp.choices[0].message.content or "").strip()
+        except Exception as exc:
+            self.logger.warning(
+                "Subcall de rol no disponible",
+                extra={"tool_args": {"role": role}, "error_details": str(exc)},
+            )
+            return ""
+
+    def plan_task(self, user_input: str) -> str:
+        if not self.guided_mode or not should_plan_task(user_input):
+            return ""
+        emit_role_event("planner", user_input)
+        plan = self._role_subcall(
+            "planner",
+            f"Tarea: {user_input}\nWorkspace: {self.work_dir}\n"
+            "Planifica para ejecutar de verdad, no para explicar teoría.",
+            max_tokens=220,
+        )
+        if plan:
+            emit_role_result("planner", "ok", plan)
+        else:
+            emit_role_result("planner", "skip", "sin plan adicional")
+        return plan
+
+    def critic_review(self, task_summary: str, changed_files: list[str]) -> str:
+        if not self.guided_mode or not should_run_critic(task_summary, changed_files):
+            return ""
+        emit_role_event("critic", f"{len(changed_files)} archivos")
+        review = self._role_subcall(
+            "critic",
+            "Tarea: {task}\nArchivos cambiados: {files}\n"
+            "Evalúa bugs, validación faltante y supuestos débiles.".format(
+                task=task_summary,
+                files=", ".join(sorted(set(changed_files))) or "(ninguno)",
+            ),
+            max_tokens=220,
+        )
+        if review:
+            status = "ok" if "sin problemas" in review.lower() or review.strip().startswith("✓") else "issue"
+            emit_role_result("critic", status if status == "ok" else "fail", review)
+        else:
+            emit_role_result("critic", "skip", "sin review")
+        return review
+
+    def recovery_retry(self, reason: str) -> str:
+        emit_role_event("recovery", reason)
+        retry = self._role_subcall("recovery", reason, max_tokens=140)
+        if retry:
+            emit_role_result("recovery", "ok", retry)
+            return retry
+        emit_role_result("recovery", "skip", "usando instrucción determinista")
+        return reason
+
     def run(self):
         """Bucle principal REPL del agente local."""
         if not self._validate_model():
@@ -477,7 +575,9 @@ class Agent:
                     self.current_mode, cfg["system_prompt_snippet"]
                 ),
                 system_prompt_path=self.system_prompt_path,
-                desktop=str(Path.home() / "Desktop"),
+                desktop=get_workspace_placeholder_targets()["desktop"],
+                documents=get_workspace_placeholder_targets()["documents"],
+                workspace=get_workspace_placeholder_targets()["workspace"],
                 project_context=project_context,
                 mode=self.current_mode,
                 mode_snippet=cfg["system_prompt_snippet"],
@@ -495,10 +595,10 @@ class Agent:
         self.logger.info("Sesión iniciada", extra={"tool_args": {
             "model": self.model, "work_dir": self.work_dir,
             "tag": self.tag, "num_ctx": self.num_ctx,
-            "temperature": self.temperature,
+            "temperature": self.temperature, "guided_mode": self.guided_mode,
         }})
 
-        print_header(self.model, self.work_dir, self.tag, self.num_ctx, self.temperature)
+        print_header(self.model, self.work_dir, self.tag, self.num_ctx, self.temperature, self.read_only)
 
         while True:
             prompt_color = self.MODE_CONFIGS[self.current_mode]["color"]
@@ -533,111 +633,168 @@ class Agent:
 
             self.logger.info("Mensaje del usuario", extra={"user_input": user_input})
             self.messages.append({"role": "user", "content": user_input})
+            plan = self.plan_task(user_input)
+            guidance_messages = []
+            if plan:
+                guidance_messages.append({"role": "system", "content": f"[PLAN INTERNO]\n{plan}"})
 
-            # File-creation post-condition tracking
-            _file_intent    = detect_file_creation_intent(user_input)
-            candidates      = extract_candidate_paths(user_input)
-            _expected_path  = resolve_in_workspace(candidates[0]).resolve() if candidates else None
-            _file_created   = False
-            _recovery_done  = False
+            candidates = extract_candidate_paths(user_input)
+            expected_paths: list[str] = candidates[:1]
+            changed_files: list[str] = []
+            test_results: list[dict] = []
+            recovery_count = 0
+            critic_fix_used = False
+            before_snapshots = snapshot_workspace_files(expected_paths)
 
             while True:
-                trimmed = self._trim_history()
-                full_content, tool_calls = self._stream_response(trimmed, TOOLS)
+                emit_role_event("executor", user_input if recovery_count == 0 else f"retry {recovery_count}: {user_input}")
+                file_created = False
+                file_recovery_done = False
 
-                if full_content:
-                    self.logger.info("Respuesta del asistente",
-                                     extra={"assistant_response": full_content[:2000]})
+                while True:
+                    trimmed = self._trim_history() + guidance_messages
+                    full_content, tool_calls = self._stream_response(trimmed, self.tools)
 
-                if tool_calls:
-                    console.print()
-                    # Se registra el mensaje asistente con `tool_calls` para
-                    # conservar un historial compatible con la API OpenAI.
-                    self.messages.append({
-                        "role": "assistant",
-                        "content": full_content or None,
-                        "tool_calls": [
-                            {"id": tc["id"], "type": "function",
-                             "function": {"name": tc["name"],
-                                          "arguments": json.dumps(tc["arguments"])}}
-                            for tc in tool_calls
-                        ]
-                    })
-                    for tc in tool_calls:
-                        fn_name = tc["name"]
-                        fn_args = tc["arguments"]
-                        if fn_name in TOOL_MAP:
-                            fn_args = self._validate_tool_args(fn_name, fn_args)
-                            if "error" in fn_args:
-                                result = fn_args
-                                self.logger.warning(
-                                    "Validación de argumentos fallida",
-                                    extra={"tool_name": fn_name, "error_details": fn_args["error"]}
-                                )
-                            else:
-                                self.logger.debug("Llamada a herramienta",
-                                                  extra={"tool_name": fn_name, "tool_args": fn_args})
-                                print_tool_call(fn_name, fn_args)
-                                result = self._invoke_tool(fn_name, fn_args)
-                                self.logger.debug(
-                                    "Resultado de herramienta",
-                                    extra={
-                                        "tool_name": fn_name,
-                                        "tool_result": {
-                                            k: (str(v)[:500] if isinstance(v, str) else v)
-                                            for k, v in result.items()
-                                        },
-                                    }
-                                )
-                                if "error" in result:
-                                    self.logger.error(
-                                        "Herramienta devolvió error",
-                                        extra={"tool_name": fn_name, "error_details": result["error"]}
-                                    )
-                                # Track successful file creation and ensure it matches the expected path if any.
-                                if fn_name == "write_file" and "error" not in result:
-                                    target = fn_args.get("path") or result.get("path")
-                                    if target:
-                                        target_path = resolve_in_workspace(str(target))
-                                        if _expected_path is None or target_path == _expected_path:
-                                            _file_created = True
-                                    else:
-                                        _file_created = True
-                        else:
-                            result = {"error": f"Tool desconocida: {fn_name}"}
-                            self.logger.error("Tool desconocida",
-                                              extra={"tool_name": fn_name,
-                                                     "error_details": result["error"]})
-                        print_tool_result(result)
+                    if full_content:
+                        self.logger.info("Respuesta del asistente",
+                                         extra={"assistant_response": full_content[:2000]})
+
+                    if tool_calls:
+                        console.print()
                         self.messages.append({
-                            "role": "tool",
-                            "tool_call_id": tc["id"],
-                            "content": json.dumps(result, ensure_ascii=False),
+                            "role": "assistant",
+                            "content": full_content or None,
+                            "tool_calls": [
+                                {"id": tc["id"], "type": "function",
+                                 "function": {"name": tc["name"],
+                                              "arguments": json.dumps(tc["arguments"])}}
+                                for tc in tool_calls
+                            ]
                         })
-                else:
-                    self.messages.append({"role": "assistant", "content": full_content})
-                    # Recovery: if user asked for a file but none was created and
-                    # the model just returned plain text, give it one explicit nudge.
-                    if _file_intent and not _file_created and not _recovery_done:
-                        _recovery_done = True
-                        target_hint = ""
-                        if _expected_path is not None:
-                            rel = _expected_path.relative_to(Path(self.work_dir))
-                            target_hint = f" Ruta esperada: {rel}"
-                        recovery = (
-                            "No creaste el archivo — respondiste con texto. "
-                            "Usa write_file() ahora para crear el archivo en la ruta que indicó el usuario. "
-                            "Si el directorio no existe dentro del workspace, usa create_directory() primero."
-                            f"{target_hint}"
+                        for tc in tool_calls:
+                            fn_name = tc["name"]
+                            fn_args = tc["arguments"]
+                            if fn_name in TOOL_MAP:
+                                fn_args = self._validate_tool_args(fn_name, fn_args)
+                                if "error" in fn_args:
+                                    result = fn_args
+                                    self.logger.warning(
+                                        "Validación de argumentos fallida",
+                                        extra={"tool_name": fn_name, "error_details": fn_args["error"]}
+                                    )
+                                else:
+                                    tracked_paths: list[str] = []
+                                    if fn_name in {"write_file", "edit_file", "read_file", "delete_file", "create_directory", "change_directory"}:
+                                        if fn_args.get("path"):
+                                            tracked_paths.append(str(fn_args["path"]))
+                                    if fn_name == "move_file":
+                                        tracked_paths.extend([str(fn_args.get("src", "")), str(fn_args.get("dst", ""))])
+                                    before_snapshots.update(snapshot_workspace_files(tracked_paths))
+
+                                    self.logger.debug("Llamada a herramienta",
+                                                      extra={"tool_name": fn_name, "tool_args": fn_args})
+                                    print_tool_call(fn_name, fn_args)
+                                    result = self._invoke_tool(fn_name, fn_args)
+                                    self.logger.debug(
+                                        "Resultado de herramienta",
+                                        extra={
+                                            "tool_name": fn_name,
+                                            "tool_result": {
+                                                k: (str(v)[:500] if isinstance(v, str) else v)
+                                                for k, v in result.items()
+                                            },
+                                        }
+                                    )
+                                    if "error" in result:
+                                        self.logger.error(
+                                            "Herramienta devolvió error",
+                                            extra={"tool_name": fn_name, "error_details": result["error"]}
+                                        )
+                                    if fn_name in {"write_file", "edit_file", "move_file", "delete_file"} and "error" not in result:
+                                        path_hint = result.get("path") or result.get("to") or fn_args.get("path") or fn_args.get("dst")
+                                        if path_hint:
+                                            changed_files.append(str(path_hint))
+                                    if fn_name == "run_command":
+                                        command_text = str(fn_args.get("command", ""))
+                                        if requested_test_validation(user_input) or re.search(r"\b(test|pytest|unittest|cargo test)\b", command_text, re.I):
+                                            test_results.append(result)
+                                    if fn_name == "write_file" and "error" not in result:
+                                        target = result.get("path") or fn_args.get("path")
+                                        if target:
+                                            try:
+                                                target_path = resolve_in_workspace(str(target)).resolve()
+                                            except ValueError:
+                                                target_path = None
+                                            expected_resolved = None
+                                            if expected_paths:
+                                                try:
+                                                    expected_resolved = resolve_in_workspace(expected_paths[0]).resolve()
+                                                except ValueError:
+                                                    expected_resolved = None
+                                            if target_path is not None and (
+                                                expected_resolved is None or target_path == expected_resolved
+                                            ):
+                                                file_created = True
+                            else:
+                                result = {"error": f"Tool desconocida: {fn_name}"}
+                                self.logger.error("Tool desconocida",
+                                                  extra={"tool_name": fn_name,
+                                                         "error_details": result["error"]})
+                            print_tool_result(result)
+                            self.messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "content": json.dumps(result, ensure_ascii=False),
+                            })
+                    else:
+                        self.messages.append({"role": "assistant", "content": full_content})
+                        if detect_file_creation_intent(user_input) and not file_created and not file_recovery_done:
+                            file_recovery_done = True
+                            recovery = build_recovery_instruction(
+                                "El usuario pidió crear un archivo y todavía no existe en disco."
+                            )
+                            self.messages.append({"role": "user", "content": recovery})
+                            console.print(f"[{C_DIM}]  ↺ El modelo no usó write_file() — reintentando...[/]")
+                            self.logger.warning(
+                                "Recuperación file-creation: modelo devolvió texto sin write_file()",
+                                extra={"tool_args": {"user_input": user_input[:200]}},
+                            )
+                            continue
+                        break
+
+                emit_role_result("executor", "ok", f"{len(changed_files)} cambios rastreados")
+                report = None
+                if self.guided_mode and should_verify_task(user_input, changed_files):
+                    emit_role_event("verifier", user_input)
+                    report = verify_workspace_changes(
+                        expected_paths=expected_paths,
+                        changed_paths=changed_files,
+                        before_snapshots=before_snapshots,
+                        test_results=test_results,
+                        require_tests=requested_test_validation(user_input),
+                    )
+                    emit_role_result(
+                        "verifier",
+                        "ok" if report.ok else "fail",
+                        report.summary if report.ok else "; ".join(report.errors[:3]) or report.summary,
+                    )
+                    if not report.ok and recovery_count < self.max_recovery_attempts:
+                        recovery_count += 1
+                        retry_instruction = self.recovery_retry(
+                            build_recovery_instruction("La verificación falló.", report)
                         )
-                        self.messages.append({"role": "user", "content": recovery})
-                        console.print(f"[{C_DIM}]  ↺ El modelo no usó write_file() — reintentando...[/]")
-                        self.logger.warning(
-                            "Recuperación file-creation: modelo devolvió texto sin write_file()",
-                            extra={"tool_args": {"user_input": user_input[:200]}},
-                        )
+                        self.messages.append({"role": "user", "content": retry_instruction})
                         continue
-                    break
+
+                review = self.critic_review(user_input, changed_files)
+                if review and not critic_fix_used and "sin problemas" not in review.lower() and not review.strip().startswith("✓"):
+                    critic_fix_used = True
+                    correction = self.recovery_retry(
+                        f"Corrige estos hallazgos del crítico y vuelve a verificar: {summarize_text(review, 220)}"
+                    )
+                    self.messages.append({"role": "user", "content": correction})
+                    continue
+                break
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -695,8 +852,10 @@ def select_model_menu(api_base: str = "http://localhost:11434/v1") -> str:
 
 def run_agent(model: str, work_dir: str, tag: str, num_ctx: int, temperature: float,
               api_base: str = "http://localhost:11434/v1",
-              system_prompt_path: Optional[str] = None):
-    Agent(model, work_dir, tag, num_ctx, temperature, api_base, system_prompt_path).run()
+              system_prompt_path: Optional[str] = None,
+              read_only: bool = False,
+              guided_mode: bool = False):
+    Agent(model, work_dir, tag, num_ctx, temperature, api_base, system_prompt_path, read_only, guided_mode).run()
 
 
 if __name__ == "__main__":
@@ -708,6 +867,18 @@ if __name__ == "__main__":
     parser.add_argument("--temp",     type=float, default=0.15, help="Temperatura 0.0-1.0")
     parser.add_argument("--api-base", default="http://localhost:11434/v1", help="URL OpenAI-compatible del backend local")
     parser.add_argument("--system-prompt", default=None, help="Ruta opcional a un prompt de sistema custom")
+    parser.add_argument("--read-only", action="store_true", help="Bloquea tools mutantes y shell de escritura")
+    parser.add_argument("--guided-mode", action="store_true", help="Activa planner/verifier/critic/recovery ligeros")
     args = parser.parse_args()
     model = args.model if args.model else select_model_menu(args.api_base)
-    run_agent(model, args.dir, args.tag, args.ctx, args.temp, args.api_base, args.system_prompt)
+    run_agent(
+        model,
+        args.dir,
+        args.tag,
+        args.ctx,
+        args.temp,
+        args.api_base,
+        args.system_prompt,
+        args.read_only,
+        args.guided_mode,
+    )

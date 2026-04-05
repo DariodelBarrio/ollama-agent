@@ -1,9 +1,13 @@
 //! Application state machine for the launcher.
 
-use crate::agent::AgentSession;
+use crate::agent::{AgentSession, RecentTool};
 use crate::config::{Profile, ProfileStore, Variant};
 use crate::models::{native_api_base, InstalledModel, ModelEvent, ModelTask};
-use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+use crate::preflight::{self, PreflightReport};
+use ratatui::{
+    crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind},
+    layout::{Constraint, Layout, Rect},
+};
 use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
@@ -39,22 +43,52 @@ pub struct Field {
 
 impl Field {
     fn text(label: &'static str, v: &str) -> Self {
-        Self { label, value: v.into(), kind: FieldKind::Text, editing: false }
+        Self {
+            label,
+            value: v.into(),
+            kind: FieldKind::Text,
+            editing: false,
+        }
     }
     fn path(label: &'static str, v: &str) -> Self {
-        Self { label, value: v.into(), kind: FieldKind::Path, editing: false }
+        Self {
+            label,
+            value: v.into(),
+            kind: FieldKind::Path,
+            editing: false,
+        }
     }
     fn int(label: &'static str, v: u32) -> Self {
-        Self { label, value: v.to_string(), kind: FieldKind::Integer, editing: false }
+        Self {
+            label,
+            value: v.to_string(),
+            kind: FieldKind::Integer,
+            editing: false,
+        }
     }
     fn float(label: &'static str, v: f32) -> Self {
-        Self { label, value: format!("{v:.2}"), kind: FieldKind::Float, editing: false }
+        Self {
+            label,
+            value: format!("{v:.2}"),
+            kind: FieldKind::Float,
+            editing: false,
+        }
     }
     fn bool(label: &'static str, v: bool) -> Self {
-        Self { label, value: if v { "on" } else { "off" }.into(), kind: FieldKind::Bool, editing: false }
+        Self {
+            label,
+            value: if v { "on" } else { "off" }.into(),
+            kind: FieldKind::Bool,
+            editing: false,
+        }
     }
     fn select(label: &'static str, v: &str, opts: Vec<&'static str>) -> Self {
-        Self { label, value: v.into(), kind: FieldKind::Select(opts), editing: false }
+        Self {
+            label,
+            value: v.into(),
+            kind: FieldKind::Select(opts),
+            editing: false,
+        }
     }
 }
 
@@ -83,9 +117,14 @@ pub struct App {
     pub repo_root: PathBuf,
     pub session: Option<AgentSession>,
     pub last_session_lines: VecDeque<String>,
+    pub last_session_tools: VecDeque<RecentTool>,
     pub input_buffer: String,
+    pub input_cursor: usize,
     pub session_scroll: u16,
     pub session_follow_output: bool,
+    pub session_mouse_mode: bool,
+    session_scroll_dragging: bool,
+    session_scroll_drag_offset: u16,
     pub models: Vec<InstalledModel>,
     pub model_idx: usize,
     pub model_logs: Vec<String>,
@@ -99,6 +138,7 @@ pub struct App {
     // avoids rebuilding the launch summary on every frame while navigating.
     pub configure_preview_command: String,
     pub configure_preview_detail: String,
+    pub preflight_report: Option<PreflightReport>,
     // Session metadata is frozen at launch time so the session screen doesn't
     // rebuild command/path previews while only the live output is changing.
     pub session_command_preview: String,
@@ -122,9 +162,14 @@ impl App {
             repo_root,
             session: None,
             last_session_lines: VecDeque::new(),
+            last_session_tools: VecDeque::new(),
             input_buffer: String::new(),
+            input_cursor: 0,
             session_scroll: 0,
             session_follow_output: true,
+            session_mouse_mode: false,
+            session_scroll_dragging: false,
+            session_scroll_drag_offset: 0,
             models: vec![],
             model_idx: 0,
             model_logs: vec![],
@@ -136,6 +181,7 @@ impl App {
             pending_model_refresh: false,
             configure_preview_command: String::new(),
             configure_preview_detail: String::new(),
+            preflight_report: None,
             session_command_preview: String::new(),
             session_work_dir_preview: String::new(),
         };
@@ -155,6 +201,8 @@ impl App {
             Field::int("Contexto", p.ctx),
             Field::float("Temperatura", p.temperature),
             Field::path("Prompt sistema", &p.system_prompt),
+            Field::bool("Read only", p.read_only),
+            Field::bool("Guided mode", p.guided_mode),
         ];
         match p.variant {
             Variant::Local => {
@@ -162,8 +210,16 @@ impl App {
             }
             Variant::Hybrid => {
                 f.push(Field::text("URL local", &p.local_url));
-                f.push(Field::select("Backend", &p.backend, vec!["auto", "local", "groq", "remote"]));
-                f.push(Field::select("Proveedor cloud", &p.cloud_provider, CLOUD_PROVIDER_OPTIONS.to_vec()));
+                f.push(Field::select(
+                    "Backend",
+                    &p.backend,
+                    vec!["auto", "local", "groq", "remote"],
+                ));
+                f.push(Field::select(
+                    "Proveedor cloud",
+                    &p.cloud_provider,
+                    CLOUD_PROVIDER_OPTIONS.to_vec(),
+                ));
                 f.push(Field::select(
                     "Preset cloud",
                     cloud_preset_value(&p.cloud_provider, &p.remote_model),
@@ -174,7 +230,11 @@ impl App {
                 f.push(Field::text("URL cloud", &p.remote_url));
                 f.push(Field::text("Modelo cloud", &p.remote_model));
                 f.push(Field::text("API key cloud", &p.remote_api_key));
-                f.push(Field::select("Sandbox", profile_select_value(&p.sandbox), vec!["off", "docker"]));
+                f.push(Field::select(
+                    "Sandbox",
+                    profile_select_value(&p.sandbox),
+                    vec!["off", "docker"],
+                ));
                 f.push(Field::text("Sandbox image", &p.sandbox_image));
             }
         }
@@ -197,6 +257,8 @@ impl App {
                     self.profile.temperature = f.value.parse().unwrap_or(self.profile.temperature)
                 }
                 "Prompt sistema" => self.profile.system_prompt = f.value.clone(),
+                "Read only" => self.profile.read_only = f.value == "on",
+                "Guided mode" => self.profile.guided_mode = f.value == "on",
                 "API base" => self.profile.api_base = f.value.clone(),
                 "URL local" => self.profile.local_url = f.value.clone(),
                 "Backend" => self.profile.backend = f.value.clone(),
@@ -212,7 +274,11 @@ impl App {
                 "Modelo cloud" => self.profile.remote_model = f.value.clone(),
                 "API key cloud" => self.profile.remote_api_key = f.value.clone(),
                 "Sandbox" => {
-                    self.profile.sandbox = if f.value == "off" { String::new() } else { f.value.clone() }
+                    self.profile.sandbox = if f.value == "off" {
+                        String::new()
+                    } else {
+                        f.value.clone()
+                    }
                 }
                 "Sandbox image" => self.profile.sandbox_image = f.value.clone(),
                 _ => {}
@@ -230,23 +296,54 @@ impl App {
         }
     }
 
+    pub fn run_preflight(&mut self) -> PreflightReport {
+        self.sync_profile();
+        let report = preflight::run(&self.profile);
+        let has_blockers = report.has_blockers();
+        self.preflight_report = Some(report.clone());
+        self.set_status(
+            if has_blockers {
+                "Preflight: se detectaron bloqueos reales.".into()
+            } else {
+                "Preflight: configuración lista.".into()
+            },
+            has_blockers,
+        );
+        self.refresh_configure_preview();
+        report
+    }
+
     pub fn launch_session(&mut self) {
         self.sync_profile();
         if self.profile.model.trim().is_empty() {
             self.set_status("El modelo no puede estar vacio.".into(), true);
             return;
         }
-        self.session_command_preview = crate::agent::command_preview(&self.profile, &self.repo_root);
-        self.session_work_dir_preview = resolve_path_for_display(&self.profile.work_dir, &self.repo_root);
+        let report = self.run_preflight();
+        if report.has_blockers() {
+            self.set_status(
+                "Preflight con errores: corrige la configuración antes de lanzar.".into(),
+                true,
+            );
+            return;
+        }
+        self.session_command_preview =
+            crate::agent::command_preview(&self.profile, &self.repo_root);
+        self.session_work_dir_preview =
+            resolve_path_for_display(&self.profile.work_dir, &self.repo_root);
         match AgentSession::spawn(&self.profile, &self.repo_root) {
             Ok(mut session) => {
-                session
-                    .lines
-                    .push_back(format!("[launcher] Sesion iniciada: {} Â· {}", self.profile.variant.label(), self.profile.model));
+                session.lines.push_back(format!(
+                    "[launcher] Sesion iniciada: {} Â· {}",
+                    self.profile.variant.label(),
+                    self.profile.model
+                ));
                 self.last_session_lines.clear();
+                self.last_session_tools.clear();
                 self.session = Some(session);
                 self.screen = Screen::Session;
                 self.input_buffer.clear();
+                self.input_cursor = 0;
                 self.session_scroll = 0;
                 self.session_follow_output = true;
                 self.set_status("Agente en ejecucion.".into(), false);
@@ -258,6 +355,7 @@ impl App {
     pub fn poll_session(&mut self) -> bool {
         let mut changed = false;
         let mut finished_lines: Option<VecDeque<String>> = None;
+        let mut finished_tools: Option<VecDeque<RecentTool>> = None;
         let mut status_update: Option<(String, bool)> = None;
 
         if let Some(session) = self.session.as_mut() {
@@ -265,19 +363,27 @@ impl App {
                 changed = true;
                 match exit {
                     Ok(status) if status.success() => {
-                        session.lines.push_back("[launcher] Proceso finalizado correctamente.".into());
+                        session
+                            .lines
+                            .push_back("[launcher] Proceso finalizado correctamente.".into());
                         status_update = Some(("La sesion termino correctamente.".into(), false));
                     }
                     Ok(status) => {
-                        session.lines.push_back(format!("[launcher] Proceso finalizado con codigo: {status}"));
+                        session.lines.push_back(format!(
+                            "[launcher] Proceso finalizado con codigo: {status}"
+                        ));
                         status_update = Some(("La sesion termino con error.".into(), true));
                     }
                     Err(err) => {
-                        session.lines.push_back(format!("[launcher] Error al esperar el proceso: {err}"));
-                        status_update = Some(("Fallo al gestionar el proceso del agente.".into(), true));
+                        session
+                            .lines
+                            .push_back(format!("[launcher] Error al esperar el proceso: {err}"));
+                        status_update =
+                            Some(("Fallo al gestionar el proceso del agente.".into(), true));
                     }
                 }
                 finished_lines = Some(session.lines.clone());
+                finished_tools = Some(session.recent_tools.clone());
             } else if !session.lines.is_empty() {
                 changed = session.last_event_changed();
             }
@@ -288,6 +394,7 @@ impl App {
         }
         if let Some(lines) = finished_lines {
             self.last_session_lines = lines;
+            self.last_session_tools = finished_tools.unwrap_or_default();
             self.session = None;
             changed = true;
         }
@@ -318,14 +425,18 @@ impl App {
                     self.model_progress = None;
                     match result {
                         Ok(models) => {
-                            let names: Vec<String> = models.iter().map(|model| model.name.clone()).collect();
+                            let names: Vec<String> =
+                                models.iter().map(|model| model.name.clone()).collect();
                             self.models = models;
                             self.model_idx = names
                                 .iter()
                                 .position(|name| name == &self.profile.model)
                                 .unwrap_or(0)
                                 .min(self.models.len().saturating_sub(1));
-                            self.push_model_log(format!("Modelos disponibles: {}", self.models.len()));
+                            self.push_model_log(format!(
+                                "Modelos disponibles: {}",
+                                self.models.len()
+                            ));
                             self.set_status("Listado de modelos actualizado.".into(), false);
                         }
                         Err(err) => {
@@ -379,7 +490,12 @@ impl App {
     }
 
     pub fn delete_selected_profile(&mut self) {
-        if let Some(name) = self.store.profiles.get(self.profile_idx).map(|p| p.name.clone()) {
+        if let Some(name) = self
+            .store
+            .profiles
+            .get(self.profile_idx)
+            .map(|p| p.name.clone())
+        {
             self.store.remove(&name);
             let _ = self.store.save();
             self.profile_idx = self.profile_idx.saturating_sub(1);
@@ -418,16 +534,36 @@ impl App {
         // Render only the visible tail/window instead of the whole retained
         // session history. This keeps redraw cost bounded as logs grow.
         let (start, len) = visible_window_bounds(lines.len(), window, self.session_scroll as usize);
-        lines.iter().skip(start).take(len).cloned().collect::<Vec<_>>().join("\n")
+        lines
+            .iter()
+            .skip(start)
+            .take(len)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     pub fn session_view_label(&self) -> String {
-        match (self.session.is_some(), self.session_follow_output, self.session_scroll) {
+        match (
+            self.session.is_some(),
+            self.session_follow_output,
+            self.session_scroll,
+        ) {
             (true, true, _) => " Live Output · following ".into(),
             (true, false, n) if n > 0 => format!(" Live Output · +{n} "),
             (true, false, _) => " Live Output ".into(),
             (false, _, _) => " Last Session ".into(),
         }
+    }
+
+    pub fn session_scrollbar_metrics(&self, height: u16) -> Option<(usize, usize, usize)> {
+        let window = height.max(1) as usize;
+        let lines = self.session_lines();
+        if lines.len() <= window {
+            return None;
+        }
+        let (start, len) = visible_window_bounds(lines.len(), window, self.session_scroll as usize);
+        Some((lines.len(), start, len))
     }
 
     pub fn model_window_text(&self, height: u16) -> String {
@@ -440,7 +576,70 @@ impl App {
         }
         let window = height.max(1) as usize;
         let start = combined.len().saturating_sub(window);
-        combined.into_iter().skip(start).collect::<Vec<_>>().join("\n")
+        combined
+            .into_iter()
+            .skip(start)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    pub fn recent_tools_text(&self, height: u16) -> String {
+        let tools = if let Some(session) = self.session.as_ref() {
+            &session.recent_tools
+        } else {
+            &self.last_session_tools
+        };
+        if tools.is_empty() {
+            return "Sin tools recientes.".into();
+        }
+        let window = height.max(1) as usize;
+        let start = tools.len().saturating_sub(window);
+        tools
+            .iter()
+            .skip(start)
+            .map(|tool| {
+                if tool.target.is_empty() {
+                    format!("{} -> {}", tool.title, tool.result)
+                } else {
+                    format!("{} {} -> {}", tool.title, tool.target, tool.result)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    pub fn session_meta_text(&self) -> String {
+        let preflight = self
+            .preflight_report
+            .as_ref()
+            .map(|report| report.summary_line())
+            .unwrap_or_else(|| "preflight: sin ejecutar".into());
+        format!(
+            "{}\nworkdir: {}\nmodo: {}  guided: {}  {}",
+            self.session_command_preview,
+            self.session_work_dir_preview,
+            if self.profile.read_only {
+                "read-only"
+            } else {
+                "read-write"
+            },
+            if self.profile.guided_mode {
+                "on"
+            } else {
+                "off"
+            },
+            preflight
+        )
+    }
+
+    pub fn current_screen_hint(&self) -> &'static str {
+        match self.screen {
+            Screen::MainMenu => "j/k navegar  Enter abrir  q salir",
+            Screen::Configure => "Tab campo  Enter editar  F3 modelos  F4 preset GPU  F5 lanzar  F8 preflight  F2 guardar  Esc volver",
+            Screen::Models => "j/k navegar  Enter usar  g recomendado  p pull  d borrar  r refrescar  Esc volver",
+            Screen::Profiles => "j/k navegar  Enter cargar  d borrar  Esc volver",
+            Screen::Session => "Escribir o /clear  Flechas izq/der editar  F6 detener  F7 ratón  PgUp/PgDn scroll  Esc volver",
+        }
     }
 
     pub fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) {
@@ -452,6 +651,18 @@ impl App {
             Screen::Profiles => self.on_profiles(code),
             Screen::Session => self.on_session(code, mods),
         }
+    }
+
+    pub fn handle_mouse(&mut self, event: MouseEvent, frame_area: Rect) {
+        self.status = None;
+        if self.screen != Screen::Session || !self.session_mouse_mode {
+            return;
+        }
+        self.on_session_mouse(event, frame_area);
+    }
+
+    pub fn wants_mouse_capture(&self) -> bool {
+        self.screen == Screen::Session && self.session_mouse_mode
     }
 
     fn on_main_menu(&mut self, code: KeyCode) {
@@ -491,7 +702,11 @@ impl App {
     }
 
     fn on_configure(&mut self, code: KeyCode, mods: KeyModifiers) {
-        let editing = self.fields.get(self.field_idx).map(|f| f.editing).unwrap_or(false);
+        let editing = self
+            .fields
+            .get(self.field_idx)
+            .map(|f| f.editing)
+            .unwrap_or(false);
         if editing {
             self.on_configure_editing(code);
         } else {
@@ -535,13 +750,19 @@ impl App {
     fn on_configure_nav(&mut self, code: KeyCode, mods: KeyModifiers) {
         let n = self.fields.len();
         match code {
-            KeyCode::Tab | KeyCode::Down => self.field_idx = (self.field_idx + 1).min(n.saturating_sub(1)),
+            KeyCode::Tab | KeyCode::Down => {
+                self.field_idx = (self.field_idx + 1).min(n.saturating_sub(1))
+            }
             KeyCode::BackTab | KeyCode::Up => self.field_idx = self.field_idx.saturating_sub(1),
             KeyCode::Enter | KeyCode::Char(' ') => {
                 if let Some(f) = self.fields.get_mut(self.field_idx) {
                     match f.kind.clone() {
                         FieldKind::Bool => {
-                            f.value = if f.value == "on" { "off".into() } else { "on".into() };
+                            f.value = if f.value == "on" {
+                                "off".into()
+                            } else {
+                                "on".into()
+                            };
                             self.refresh_configure_preview();
                         }
                         FieldKind::Select(opts) => {
@@ -562,6 +783,9 @@ impl App {
                 }
             }
             KeyCode::F(5) => self.launch_session(),
+            KeyCode::F(8) => {
+                self.run_preflight();
+            }
             KeyCode::F(4) => self.apply_gpu_recommendation(),
             KeyCode::F(3) => self.open_models_screen(),
             KeyCode::Char('l') if mods.contains(KeyModifiers::CONTROL) => self.launch_session(),
@@ -575,7 +799,9 @@ impl App {
     fn on_profiles(&mut self, code: KeyCode) {
         let n = self.store.profiles.len();
         match code {
-            KeyCode::Up | KeyCode::Char('k') => self.profile_idx = self.profile_idx.saturating_sub(1),
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.profile_idx = self.profile_idx.saturating_sub(1)
+            }
             KeyCode::Down | KeyCode::Char('j') => {
                 if n > 0 && self.profile_idx + 1 < n {
                     self.profile_idx += 1;
@@ -635,11 +861,29 @@ impl App {
         match code {
             KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => self.stop_session(),
             KeyCode::F(6) => self.stop_session(),
+            KeyCode::F(7) => {
+                self.session_mouse_mode = !self.session_mouse_mode;
+                self.session_scroll_dragging = false;
+                self.set_status(
+                    if self.session_mouse_mode {
+                        "Modo raton activado: barra arrastrable y rueda activas.".into()
+                    } else {
+                        "Modo raton desactivado: el terminal vuelve a permitir seleccion y copia."
+                            .into()
+                    },
+                    false,
+                );
+            }
             KeyCode::Enter => {
                 // Session input is always "hot": typing edits the current line
                 // immediately and Enter ships it to the managed Python process.
                 let line = self.input_buffer.trim().to_string();
                 if line.is_empty() {
+                    return;
+                }
+                if self.handle_session_command(&line) {
+                    self.input_buffer.clear();
+                    self.input_cursor = 0;
                     return;
                 }
                 let send_result = if let Some(session) = self.session.as_mut() {
@@ -653,6 +897,7 @@ impl App {
                             session.lines.push_back(format!("> {line}"));
                         }
                         self.input_buffer.clear();
+                        self.input_cursor = 0;
                         if self.session_follow_output {
                             self.session_scroll = 0;
                         }
@@ -661,32 +906,33 @@ impl App {
                 }
             }
             KeyCode::Backspace => {
-                self.input_buffer.pop();
+                self.delete_session_input_before_cursor();
             }
-            KeyCode::Char(c) if !mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT) => {
-                self.input_buffer.push(c);
+            KeyCode::Delete => {
+                self.delete_session_input_at_cursor();
+            }
+            KeyCode::Char(c)
+                if !mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT) =>
+            {
+                self.insert_session_input(c);
+            }
+            KeyCode::Left => {
+                self.input_cursor = self.input_cursor.saturating_sub(1);
+            }
+            KeyCode::Right => {
+                self.input_cursor = (self.input_cursor + 1).min(self.input_buffer.len());
             }
             KeyCode::Up => {
-                // Leaving follow mode is explicit: as soon as the user scrolls
-                // up, new output stops forcing the view back to the bottom.
-                self.session_follow_output = false;
-                self.session_scroll = self.session_scroll.saturating_add(1);
+                self.scroll_session_up(1);
             }
             KeyCode::Down => {
-                self.session_scroll = self.session_scroll.saturating_sub(1);
-                if self.session_scroll == 0 {
-                    self.session_follow_output = true;
-                }
+                self.scroll_session_down(1);
             }
             KeyCode::PageUp => {
-                self.session_follow_output = false;
-                self.session_scroll = self.session_scroll.saturating_add(10);
+                self.scroll_session_up(10);
             }
             KeyCode::PageDown => {
-                self.session_scroll = self.session_scroll.saturating_sub(10);
-                if self.session_scroll == 0 {
-                    self.session_follow_output = true;
-                }
+                self.scroll_session_down(10);
             }
             KeyCode::Home => {
                 self.session_follow_output = false;
@@ -698,10 +944,246 @@ impl App {
             }
             KeyCode::Esc => {
                 self.input_buffer.clear();
+                self.input_cursor = 0;
+                self.session_mouse_mode = false;
+                self.session_scroll_dragging = false;
                 self.screen = Screen::Configure;
             }
             _ => {}
         }
+    }
+
+    fn on_session_mouse(&mut self, event: MouseEvent, frame_area: Rect) {
+        let Some(track_area) = self.session_scrollbar_track_area(frame_area) else {
+            self.session_scroll_dragging = false;
+            return;
+        };
+        let thumb_area = self.session_scrollbar_thumb_area(frame_area);
+        let over_track = rect_contains(track_area, event.column, event.row);
+        let over_thumb =
+            thumb_area.is_some_and(|area| rect_contains(area, event.column, event.row));
+
+        match event.kind {
+            MouseEventKind::ScrollUp => {
+                if over_track
+                    || self
+                        .session_log_area(frame_area)
+                        .is_some_and(|area| rect_contains(area, event.column, event.row))
+                {
+                    self.scroll_session_up(3);
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                if over_track
+                    || self
+                        .session_log_area(frame_area)
+                        .is_some_and(|area| rect_contains(area, event.column, event.row))
+                {
+                    self.scroll_session_down(3);
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if over_thumb {
+                    self.session_scroll_dragging = true;
+                    self.session_scroll_drag_offset =
+                        event.row.saturating_sub(thumb_area.unwrap().y);
+                } else if over_track {
+                    self.session_scroll_dragging = false;
+                    self.session_scroll_drag_offset = 0;
+                    self.set_session_scroll_from_track_row(event.row, track_area, 0);
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if self.session_scroll_dragging {
+                    self.set_session_scroll_from_track_row(
+                        event.row,
+                        track_area,
+                        self.session_scroll_drag_offset,
+                    );
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.session_scroll_dragging = false;
+                self.session_scroll_drag_offset = 0;
+            }
+            _ => {}
+        }
+    }
+
+    fn scroll_session_up(&mut self, amount: u16) {
+        if amount == 0 {
+            return;
+        }
+        // Leaving follow mode is explicit: as soon as the user scrolls up,
+        // new output stops forcing the view back to the bottom.
+        self.session_follow_output = false;
+        self.session_scroll = self.session_scroll.saturating_add(amount);
+    }
+
+    fn scroll_session_down(&mut self, amount: u16) {
+        if amount == 0 {
+            return;
+        }
+        self.session_scroll = self.session_scroll.saturating_sub(amount);
+        if self.session_scroll == 0 {
+            self.session_follow_output = true;
+        }
+    }
+
+    fn session_log_area(&self, frame_area: Rect) -> Option<Rect> {
+        let [_, body, _] = Layout::vertical([
+            Constraint::Length(2),
+            Constraint::Min(0),
+            Constraint::Length(2),
+        ])
+        .areas(frame_area);
+        let [_, log_area, _] = Layout::vertical([
+            Constraint::Length(4),
+            Constraint::Min(4),
+            Constraint::Length(3),
+        ])
+        .areas(body);
+        if log_area.width < 2 || log_area.height < 3 {
+            None
+        } else {
+            Some(log_area)
+        }
+    }
+
+    fn session_scrollbar_track_area(&self, frame_area: Rect) -> Option<Rect> {
+        let log_area = self.session_log_area(frame_area)?;
+        let visible_log_height = log_area.height.saturating_sub(2);
+        self.session_scrollbar_metrics(visible_log_height)?;
+        Some(Rect {
+            x: log_area.x + log_area.width.saturating_sub(1),
+            y: log_area.y + 1,
+            width: 1,
+            height: visible_log_height.max(1),
+        })
+    }
+
+    fn session_scrollbar_thumb_area(&self, frame_area: Rect) -> Option<Rect> {
+        let track_area = self.session_scrollbar_track_area(frame_area)?;
+        let (_, thumb_start, thumb_len) =
+            self.session_scrollbar_thumb_metrics(track_area.height)?;
+        Some(Rect {
+            x: track_area.x,
+            y: track_area.y + thumb_start,
+            width: track_area.width,
+            height: thumb_len,
+        })
+    }
+
+    fn session_scrollbar_thumb_metrics(&self, track_height: u16) -> Option<(usize, u16, u16)> {
+        let (total, start, viewport) = self.session_scrollbar_metrics(track_height)?;
+        let track_len = track_height.max(1) as usize;
+        let max_start = total.saturating_sub(viewport);
+        let thumb_len = ((track_len * viewport).max(total) / total)
+            .max(1)
+            .min(track_len);
+        let travel = track_len.saturating_sub(thumb_len);
+        let thumb_start = if max_start == 0 || travel == 0 {
+            0
+        } else {
+            ((start * travel) / max_start) as u16
+        };
+        Some((max_start, thumb_start, thumb_len as u16))
+    }
+
+    fn set_session_scroll_from_track_row(&mut self, row: u16, track_area: Rect, drag_offset: u16) {
+        let Some((max_start, _, thumb_len)) =
+            self.session_scrollbar_thumb_metrics(track_area.height)
+        else {
+            self.session_scroll = 0;
+            self.session_follow_output = true;
+            return;
+        };
+        let track_len = track_area.height.max(1) as usize;
+        let travel = track_len.saturating_sub(thumb_len as usize);
+        if max_start == 0 || travel == 0 {
+            self.session_scroll = 0;
+            self.session_follow_output = true;
+            return;
+        }
+
+        let top_row = row.saturating_sub(drag_offset);
+        let max_top = track_area.y + track_area.height.saturating_sub(thumb_len);
+        let clamped_top = top_row.clamp(track_area.y, max_top);
+        let relative_top = clamped_top.saturating_sub(track_area.y) as usize;
+        let start = (relative_top * max_start + (travel / 2)) / travel;
+        let scroll_from_bottom = max_start.saturating_sub(start);
+        self.session_scroll = scroll_from_bottom.min(u16::MAX as usize) as u16;
+        self.session_follow_output = self.session_scroll == 0;
+    }
+
+    fn insert_session_input(&mut self, c: char) {
+        self.input_buffer.insert(self.input_cursor, c);
+        self.input_cursor += c.len_utf8();
+    }
+
+    fn handle_session_command(&mut self, line: &str) -> bool {
+        match line.trim() {
+            "/clear" | "/reset" => {
+                self.restart_session_with_clean_chat();
+                true
+            }
+            "/help" => {
+                if let Some(session) = self.session.as_mut() {
+                    session
+                        .lines
+                        .push_back("[launcher] Comandos locales: /clear, /reset, /help".into());
+                } else {
+                    self.last_session_lines
+                        .push_back("[launcher] Comandos locales: /clear, /reset, /help".into());
+                }
+                self.set_status("Mostrando ayuda de comandos locales.".into(), false);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn restart_session_with_clean_chat(&mut self) {
+        if let Some(mut session) = self.session.take() {
+            let _ = session.stop();
+        }
+        self.last_session_lines.clear();
+        self.input_buffer.clear();
+        self.input_cursor = 0;
+        self.session_scroll = 0;
+        self.session_follow_output = true;
+        self.session_scroll_dragging = false;
+        self.launch_session();
+        if let Some(session) = self.session.as_mut() {
+            session
+                .lines
+                .push_back("[launcher] Conversacion reiniciada con /clear.".into());
+        }
+    }
+
+    fn delete_session_input_before_cursor(&mut self) {
+        if self.input_cursor == 0 || self.input_buffer.is_empty() {
+            return;
+        }
+        let prev = self.input_buffer[..self.input_cursor]
+            .char_indices()
+            .last()
+            .map(|(idx, _)| idx)
+            .unwrap_or(0);
+        self.input_buffer.drain(prev..self.input_cursor);
+        self.input_cursor = prev;
+    }
+
+    fn delete_session_input_at_cursor(&mut self) {
+        if self.input_cursor >= self.input_buffer.len() || self.input_buffer.is_empty() {
+            return;
+        }
+        let next = self.input_buffer[self.input_cursor..]
+            .char_indices()
+            .nth(1)
+            .map(|(idx, _)| self.input_cursor + idx)
+            .unwrap_or(self.input_buffer.len());
+        self.input_buffer.drain(self.input_cursor..next);
     }
 
     fn open_models_screen(&mut self) {
@@ -760,9 +1242,16 @@ impl App {
 
     fn pull_gpu_recommendation(&mut self) {
         self.sync_profile();
-        let rec = gpu_recommendation(&self.profile.gpu_profile, &self.profile.gpu_preset, &self.profile.variant);
+        let rec = gpu_recommendation(
+            &self.profile.gpu_profile,
+            &self.profile.gpu_preset,
+            &self.profile.variant,
+        );
         if rec.label == "custom" || rec.model.is_empty() {
-            self.set_status("Selecciona una GPU concreta para instalar un modelo recomendado.".into(), true);
+            self.set_status(
+                "Selecciona una GPU concreta para instalar un modelo recomendado.".into(),
+                true,
+            );
             return;
         }
         self.model_input_buffer = rec.model.into();
@@ -818,9 +1307,16 @@ impl App {
 
     fn apply_gpu_recommendation(&mut self) {
         self.sync_profile();
-        let rec = gpu_recommendation(&self.profile.gpu_profile, &self.profile.gpu_preset, &self.profile.variant);
+        let rec = gpu_recommendation(
+            &self.profile.gpu_profile,
+            &self.profile.gpu_preset,
+            &self.profile.variant,
+        );
         if rec.label == "custom" {
-            self.set_status("Perfil GPU en custom: no se aplican cambios automaticos.".into(), false);
+            self.set_status(
+                "Perfil GPU en custom: no se aplican cambios automaticos.".into(),
+                false,
+            );
             return;
         }
         self.profile.model = rec.model.into();
@@ -854,8 +1350,12 @@ impl App {
                 "Directorio" => preview.work_dir = f.value.clone(),
                 "Tag" => preview.tag = f.value.clone(),
                 "Contexto" => preview.ctx = f.value.parse().unwrap_or(preview.ctx),
-                "Temperatura" => preview.temperature = f.value.parse().unwrap_or(preview.temperature),
+                "Temperatura" => {
+                    preview.temperature = f.value.parse().unwrap_or(preview.temperature)
+                }
                 "Prompt sistema" => preview.system_prompt = f.value.clone(),
+                "Read only" => preview.read_only = f.value == "on",
+                "Guided mode" => preview.guided_mode = f.value == "on",
                 "API base" => preview.api_base = f.value.clone(),
                 "URL local" => preview.local_url = f.value.clone(),
                 "Backend" => preview.backend = f.value.clone(),
@@ -870,7 +1370,13 @@ impl App {
                 "URL cloud" => preview.remote_url = f.value.clone(),
                 "Modelo cloud" => preview.remote_model = f.value.clone(),
                 "API key cloud" => preview.remote_api_key = f.value.clone(),
-                "Sandbox" => preview.sandbox = if f.value == "off" { String::new() } else { f.value.clone() },
+                "Sandbox" => {
+                    preview.sandbox = if f.value == "off" {
+                        String::new()
+                    } else {
+                        f.value.clone()
+                    }
+                }
                 "Sandbox image" => preview.sandbox_image = f.value.clone(),
                 _ => {}
             }
@@ -881,21 +1387,38 @@ impl App {
     fn refresh_configure_preview(&mut self) {
         let preview = self.preview_profile();
         self.configure_preview_command = crate::agent::command_preview(&preview, &self.repo_root);
+        let preflight_summary = self
+            .preflight_report
+            .as_ref()
+            .map(|report| report.summary_line())
+            .unwrap_or_else(|| "preflight: pendiente".into());
         self.configure_preview_detail = match preview.variant {
             Variant::Local => format!(
-                "workdir: {}  {}",
+                "workdir: {}  modo: {}  guided: {}  {}  {}",
                 resolve_path_for_display(&preview.work_dir, &self.repo_root),
+                if preview.read_only {
+                    "read-only"
+                } else {
+                    "read-write"
+                },
+                if preview.guided_mode { "on" } else { "off" },
+                preflight_summary,
                 gpu_recommendation_summary_for(&preview)
             ),
-            Variant::Hybrid => format!(
-                "backend: {}  cloud: {}  key: {}  critic: {}  sandbox: {}  {}",
+            Variant::Hybrid => {
+                format!(
+                "backend: {}  cloud: {}  key: {}  critic: {}  sandbox: {}  modo: {}  guided: {}  {}  {}",
                 preview.backend,
                 hybrid_cloud_summary(&preview),
                 if preview.remote_api_key.trim().is_empty() { "env/off" } else { "inline" },
                 if preview.critic { "on" } else { "off" },
                 if preview.sandbox.is_empty() { "off" } else { &preview.sandbox },
+                if preview.read_only { "read-only" } else { "read-write" },
+                if preview.guided_mode { "on" } else { "off" },
+                preflight_summary,
                 gpu_recommendation_summary_for(&preview)
-            ),
+            )
+            }
         };
     }
 
@@ -969,12 +1492,14 @@ fn gpu_recommendation(gpu_profile: &str, gpu_preset: &str, variant: &Variant) ->
             model: "qwen2.5-coder:3b",
             ctx: 2048,
         },
-        ("5060", "balanced", Variant::Local) | ("5060", "balanced", Variant::Hybrid) => GpuRecommendation {
-            label: "5060",
-            preset: "balanced",
-            model: "qwen2.5-coder:7b",
-            ctx: 4096,
-        },
+        ("5060", "balanced", Variant::Local) | ("5060", "balanced", Variant::Hybrid) => {
+            GpuRecommendation {
+                label: "5060",
+                preset: "balanced",
+                model: "qwen2.5-coder:7b",
+                ctx: 4096,
+            }
+        }
         ("5060", "max", Variant::Local) | ("5060", "max", Variant::Hybrid) => GpuRecommendation {
             label: "5060",
             preset: "max",
@@ -987,12 +1512,14 @@ fn gpu_recommendation(gpu_profile: &str, gpu_preset: &str, variant: &Variant) ->
             model: "qwen2.5-coder:7b",
             ctx: 8192,
         },
-        ("5070", "balanced", Variant::Local) | ("5070", "balanced", Variant::Hybrid) => GpuRecommendation {
-            label: "5070",
-            preset: "balanced",
-            model: "qwen2.5-coder:14b",
-            ctx: 8192,
-        },
+        ("5070", "balanced", Variant::Local) | ("5070", "balanced", Variant::Hybrid) => {
+            GpuRecommendation {
+                label: "5070",
+                preset: "balanced",
+                model: "qwen2.5-coder:14b",
+                ctx: 8192,
+            }
+        }
         ("5070", "max", Variant::Local) | ("5070", "max", Variant::Hybrid) => GpuRecommendation {
             label: "5070",
             preset: "max",
@@ -1005,12 +1532,14 @@ fn gpu_recommendation(gpu_profile: &str, gpu_preset: &str, variant: &Variant) ->
             model: "qwen2.5-coder:14b",
             ctx: 8192,
         },
-        ("5080", "balanced", Variant::Local) | ("5080", "balanced", Variant::Hybrid) => GpuRecommendation {
-            label: "5080",
-            preset: "balanced",
-            model: "qwen2.5-coder:32b",
-            ctx: 8192,
-        },
+        ("5080", "balanced", Variant::Local) | ("5080", "balanced", Variant::Hybrid) => {
+            GpuRecommendation {
+                label: "5080",
+                preset: "balanced",
+                model: "qwen2.5-coder:32b",
+                ctx: 8192,
+            }
+        }
         ("5080", "max", Variant::Local) | ("5080", "max", Variant::Hybrid) => GpuRecommendation {
             label: "5080",
             preset: "max",
@@ -1023,12 +1552,14 @@ fn gpu_recommendation(gpu_profile: &str, gpu_preset: &str, variant: &Variant) ->
             model: "qwen2.5-coder:14b",
             ctx: 16384,
         },
-        ("5090", "balanced", Variant::Local) | ("5090", "balanced", Variant::Hybrid) => GpuRecommendation {
-            label: "5090",
-            preset: "balanced",
-            model: "qwen2.5-coder:32b",
-            ctx: 16384,
-        },
+        ("5090", "balanced", Variant::Local) | ("5090", "balanced", Variant::Hybrid) => {
+            GpuRecommendation {
+                label: "5090",
+                preset: "balanced",
+                model: "qwen2.5-coder:32b",
+                ctx: 16384,
+            }
+        }
         ("5090", "max", Variant::Local) | ("5090", "max", Variant::Hybrid) => GpuRecommendation {
             label: "5090",
             preset: "max",
@@ -1071,14 +1602,8 @@ fn cloud_provider_defaults(provider: &str) -> CloudProviderDefaults {
             url: "https://openrouter.ai/api/v1",
             model: "openai/gpt-4.1-mini",
         },
-        "custom" => CloudProviderDefaults {
-            url: "",
-            model: "",
-        },
-        _ => CloudProviderDefaults {
-            url: "",
-            model: "",
-        },
+        "custom" => CloudProviderDefaults { url: "", model: "" },
+        _ => CloudProviderDefaults { url: "", model: "" },
     }
 }
 
@@ -1177,6 +1702,13 @@ fn resolve_path_for_display(path: &str, repo_root: &Path) -> String {
         repo_root.join(raw)
     };
     resolved.to_string_lossy().to_string()
+}
+
+fn rect_contains(area: Rect, x: u16, y: u16) -> bool {
+    x >= area.x
+        && x < area.x.saturating_add(area.width)
+        && y >= area.y
+        && y < area.y.saturating_add(area.height)
 }
 
 #[cfg(test)]

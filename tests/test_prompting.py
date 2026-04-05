@@ -37,18 +37,23 @@ class PromptingTests(unittest.TestCase):
             "local_system_prompt.txt",
             work_dir="/tmp/proj",
             desktop="/tmp/Desktop",
+            documents="/tmp/Documents",
+            workspace="/tmp/proj",
             project_context="CTX",
             mode_section="MODO TEST",
         )
         self.assertIn("/tmp/proj", rendered)
         self.assertIn("CTX", rendered)
         self.assertIn("MODO TEST", rendered)
+        self.assertIn("/tmp/Documents", rendered)
 
     def test_render_hybrid_prompt_injects_memories(self):
         rendered = agent_prompting.render_prompt_template(
             "hybrid_system_prompt.txt",
             work_dir="/tmp/proj",
             desktop="/tmp/Desktop",
+            documents="/tmp/Documents",
+            workspace="/tmp/proj",
             project_context="",
             memories="MEMORIA_TEST",
         )
@@ -61,6 +66,8 @@ class PromptingTests(unittest.TestCase):
             "hybrid_system_prompt.txt",
             work_dir="/tmp/proj",
             desktop="/tmp/Desktop",
+            documents="/tmp/Documents",
+            workspace="/tmp/proj",
             project_context="",
             memories="",
         )
@@ -72,6 +79,8 @@ class PromptingTests(unittest.TestCase):
             "local_system_prompt.txt",
             work_dir="/tmp/proj",
             desktop="/tmp/Desktop",
+            documents="/tmp/Documents",
+            workspace="/tmp/proj",
             project_context="",
             mode_section="",
         )
@@ -79,6 +88,8 @@ class PromptingTests(unittest.TestCase):
             "hybrid_system_prompt.txt",
             work_dir="/tmp/proj",
             desktop="/tmp/Desktop",
+            documents="/tmp/Documents",
+            workspace="/tmp/proj",
             project_context="",
             memories="",
         )
@@ -86,6 +97,19 @@ class PromptingTests(unittest.TestCase):
         self.assertNotIn("<think>", local_rendered)
         self.assertNotIn("<thought>", hybrid_rendered)
         self.assertNotIn("<think>", hybrid_rendered)
+
+    def test_prompts_warn_against_unresolved_path_placeholders(self):
+        rendered = agent_prompting.render_prompt_template(
+            "local_system_prompt.txt",
+            work_dir="/tmp/proj",
+            desktop="/tmp/proj/desktop",
+            documents="/tmp/proj/documents",
+            workspace="/tmp/proj",
+            project_context="",
+            mode_section="",
+        )
+        self.assertIn("No inventes placeholders", rendered)
+        self.assertIn("desktop/...", rendered)
 
     def test_hidden_reasoning_filter_strips_internal_blocks(self):
         flt = agent_prompting.HiddenReasoningFilter()

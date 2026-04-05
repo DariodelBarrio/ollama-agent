@@ -1,4 +1,4 @@
-"""
+﻿"""
 Safety and correctness tests for ollama-agent.
 
 After the BaseAgent refactoring, path-safety and command-blocking are tested
@@ -36,7 +36,7 @@ hybrid_agent = load_module("hybrid_agent", "src/hybrid/agent.py")
 sandbox_module = load_module("sandbox_module", "src/sandbox.py")
 
 
-# ── Path safety ───────────────────────────────────────────────────────────────
+# â”€â”€ Path safety â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 class PathSafetyTests(unittest.TestCase):
     def setUp(self):
         base_agent.sync_work_dir(str(ROOT))
@@ -50,7 +50,79 @@ class PathSafetyTests(unittest.TestCase):
         self.assertTrue(str(result).startswith(str(ROOT)))
 
 
-# ── Command safety ────────────────────────────────────────────────────────────
+class PathPlaceholderResolutionTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp_root = ROOT / ".tmp-tests"
+        self._tmp_root.mkdir(exist_ok=True)
+        self._tmp = self._tmp_root / f"path-placeholders-{uuid.uuid4().hex}"
+        self._tmp.mkdir()
+        base_agent.sync_work_dir(str(self._tmp))
+
+    def tearDown(self):
+        base_agent.sync_work_dir(str(ROOT))
+        shutil.rmtree(self._tmp_root, ignore_errors=True)
+
+    def test_supported_placeholder_resolution_for_write_file(self):
+        result = base_agent.write_file("{{ desktop }}/script.py", "print('ok')\n")
+        self.assertIn("success", result)
+        target = self._tmp / "desktop" / "script.py"
+        self.assertTrue(target.exists())
+        self.assertEqual(Path(result["path"]), target.resolve())
+
+    def test_supported_alias_resolution_for_desktop_and_documents(self):
+        desktop = base_agent.write_file("desktop/script.py", "print('desk')\n")
+        documents = base_agent.write_file("documents/test.py", "print('docs')\n")
+        self.assertIn("success", desktop)
+        self.assertIn("success", documents)
+        self.assertTrue((self._tmp / "desktop" / "script.py").exists())
+        self.assertTrue((self._tmp / "documents" / "test.py").exists())
+
+    def test_supported_spanish_alias_resolution(self):
+        desktop = base_agent.write_file("escritorio/script.py", "print('desk')\n")
+        documents = base_agent.write_file("documentos/test.py", "print('docs')\n")
+        self.assertIn("success", desktop)
+        self.assertIn("success", documents)
+        self.assertTrue((self._tmp / "desktop" / "script.py").exists())
+        self.assertTrue((self._tmp / "documents" / "test.py").exists())
+
+    def test_workspace_alias_resolution(self):
+        result = base_agent.write_file("workspace/rooted.py", "print('root')\n")
+        self.assertIn("success", result)
+        self.assertTrue((self._tmp / "rooted.py").exists())
+
+    def test_unknown_placeholder_is_rejected(self):
+        result = base_agent.write_file("{{ foo }}/bar.py", "print('nope')\n")
+        self.assertIn("error", result)
+        self.assertIn("placeholder", result["error"].lower())
+
+    def test_malformed_placeholder_is_rejected(self):
+        result = base_agent.write_file("{{ desktop }/bar.py", "print('nope')\n")
+        self.assertIn("error", result)
+        self.assertTrue(
+            "placeholder" in result["error"].lower() or "plantilla" in result["error"].lower()
+        )
+
+    def test_no_literal_brace_directory_is_created(self):
+        result = base_agent.write_file("{{ foo }}/bar.py", "print('nope')\n")
+        self.assertIn("error", result)
+        self.assertFalse((self._tmp / "{{ foo }}").exists())
+
+    def test_change_directory_supports_alias_resolution(self):
+        base_agent.create_directory("desktop/projects")
+        result = base_agent.change_directory("{{ desktop }}/projects")
+        self.assertIn("success", result)
+        self.assertEqual(Path(result["cwd"]), (self._tmp / "desktop" / "projects").resolve())
+
+    def test_move_file_supports_resolved_alias_paths(self):
+        source = self._tmp / "source.txt"
+        source.write_text("hola", encoding="utf-8")
+        result = base_agent.move_file("source.txt", "{{ documents }}/moved.txt")
+        self.assertIn("success", result)
+        self.assertFalse(source.exists())
+        self.assertTrue((self._tmp / "documents" / "moved.txt").exists())
+
+
+# â”€â”€ Command safety â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 class CommandSafetyTests(unittest.TestCase):
     def setUp(self):
         base_agent.sync_work_dir(str(ROOT))
@@ -66,8 +138,8 @@ class CommandSafetyTests(unittest.TestCase):
         self.assertIn("codex_test", result["stdout"].lower())
 
     def test_run_command_blocks_rm_inside_quoted_arg(self):
-        # bash -c "rm ..." — el rm va precedido de ", no de espacio.
-        # El fix de (^|\s) → \b debe capturarlo igualmente.
+        # bash -c "rm ..." â€” el rm va precedido de ", no de espacio.
+        # El fix de (^|\s) â†’ \b debe capturarlo igualmente.
         result = base_agent.run_command('bash -c "rm -rf /tmp/fake"', timeout=5)
         self.assertIn("error", result)
         self.assertIn("bloqueado", result["error"].lower())
@@ -109,7 +181,47 @@ class CommandSafetyTests(unittest.TestCase):
         self.assertIn("bloqueado", result["error"].lower())
 
 
-# ── edit_file fuzzy matching ──────────────────────────────────────────────────
+class ReadOnlyModeTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp_root = ROOT / ".tmp-tests"
+        self._tmp_root.mkdir(exist_ok=True)
+        self._tmp = self._tmp_root / f"readonly-{uuid.uuid4().hex}"
+        self._tmp.mkdir()
+        (self._tmp / "demo.txt").write_text("hola\n", encoding="utf-8")
+        base_agent.sync_work_dir(str(self._tmp), read_only=True)
+
+    def tearDown(self):
+        base_agent.sync_work_dir(str(ROOT), read_only=False)
+        shutil.rmtree(self._tmp_root, ignore_errors=True)
+
+    def test_read_only_still_allows_reads(self):
+        result = base_agent.read_file("demo.txt")
+        self.assertIn("content", result)
+
+    def test_read_only_blocks_write_file(self):
+        result = base_agent.write_file("new.txt", "x")
+        self.assertIn("error", result)
+        self.assertIn("solo lectura", result["error"].lower())
+
+    def test_read_only_blocks_edit_file(self):
+        result = base_agent.edit_file("demo.txt", "hola", "adios")
+        self.assertIn("error", result)
+        self.assertIn("solo lectura", result["error"].lower())
+
+    def test_read_only_blocks_mutating_shell(self):
+        result = base_agent.run_command("mkdir nueva_carpeta", timeout=5)
+        self.assertIn("error", result)
+        self.assertIn("solo lectura", result["error"].lower())
+
+    def test_read_only_tool_list_hides_mutating_tools(self):
+        tools = base_agent.build_agent_tools(read_only=True)
+        names = {tool["function"]["name"] for tool in tools}
+        self.assertNotIn("write_file", names)
+        self.assertNotIn("edit_file", names)
+        self.assertIn("read_file", names)
+
+
+# â”€â”€ edit_file fuzzy matching â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 class EditFileFuzzyTests(unittest.TestCase):
     def setUp(self):
         self._tmp_root = ROOT / ".tmp-tests"
@@ -147,7 +259,7 @@ class EditFileFuzzyTests(unittest.TestCase):
         self.assertIn("read_file", result["error"])  # hint mentions read_file
 
 
-# ── Output sanitization ───────────────────────────────────────────────────────
+# â”€â”€ Output sanitization â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 class OutputSanitizationTests(unittest.TestCase):
     def test_ansi_codes_stripped(self):
         from common_tools import _sanitize_output
@@ -164,7 +276,7 @@ class OutputSanitizationTests(unittest.TestCase):
         self.assertLessEqual(len(result), 2000)   # room for truncation message
 
 
-# ── Hybrid: MemoryDB ──────────────────────────────────────────────────────────
+# â”€â”€ Hybrid: MemoryDB â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 class HybridMemoryTests(unittest.TestCase):
     def test_memory_db_sets_timestamps(self):
         temp_root = ROOT / ".tmp-tests"
@@ -187,8 +299,25 @@ class HybridMemoryTests(unittest.TestCase):
         gc.collect()
         shutil.rmtree(temp_root, ignore_errors=True)
 
+    def test_memory_db_select_for_context_prefers_search_hits_without_duplicates(self):
+        temp_root = ROOT / ".tmp-tests"
+        temp_root.mkdir(exist_ok=True)
+        temp_dir = temp_root / f"memory-select-{uuid.uuid4().hex}"
+        temp_dir.mkdir()
+        db = hybrid_agent.MemoryDB(Path(temp_dir) / "memory.db")
+        db.save("api_key_env", "Usar OPENAI_API_KEY para remoto", category="project", importance=10)
+        db.save("naming", "El usuario prefiere nombres cortos", category="preference", importance=5)
 
-# ── Hybrid: _validate_tool_args ───────────────────────────────────────────────
+        selected = db.select_for_context("api key remoto", limit=4)
+
+        self.assertTrue(selected)
+        self.assertEqual(selected[0]["key"], "api_key_env")
+        keys = [item["key"] for item in selected]
+        self.assertEqual(len(keys), len(set(keys)))
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+
+# â”€â”€ Hybrid: _validate_tool_args â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 class HybridValidationTests(unittest.TestCase):
     def setUp(self):
         base_agent.sync_work_dir(str(ROOT))
@@ -218,7 +347,7 @@ class DockerSandboxSafetyTests(unittest.TestCase):
         run_mock.assert_not_called()
 
 
-# ── delete_file root guard ────────────────────────────────────────────────────
+# â”€â”€ delete_file root guard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 class DeleteFileRootGuardTests(unittest.TestCase):
     def setUp(self):
         self._tmp_root = ROOT / ".tmp-tests"
@@ -232,10 +361,10 @@ class DeleteFileRootGuardTests(unittest.TestCase):
         shutil.rmtree(self._tmp_root, ignore_errors=True)
 
     def test_delete_file_blocks_root_dir(self):
-        # El modelo no debe poder borrar el workspace raíz en una sola llamada.
+        # El modelo no debe poder borrar el workspace raÃ­z en una sola llamada.
         result = base_agent.delete_file(str(self._tmp))
         self.assertIn("error", result)
-        self.assertIn("raíz", result["error"])
+        self.assertIn("ra", result["error"].lower())
 
     def test_delete_file_allows_subdirectory(self):
         sub = self._tmp / "subdir"
@@ -278,7 +407,7 @@ class MoveFileRootGuardTests(unittest.TestCase):
         self.assertTrue((self._tmp / "nested" / "b.txt").exists())
 
 
-# ── write_file size limit ─────────────────────────────────────────────────────
+# â”€â”€ write_file size limit â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 class WriteFileSizeLimitTests(unittest.TestCase):
     def setUp(self):
         self._tmp_root = ROOT / ".tmp-tests"
@@ -324,7 +453,7 @@ class ToolCallRecoveryTests(unittest.TestCase):
         self.assertEqual(result[0]["arguments"]["path"], "demo")
 
 
-# ── detect_file_creation_intent ───────────────────────────────────────────────
+# â”€â”€ detect_file_creation_intent â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 class FileCreationIntentTests(unittest.TestCase):
     """Unit tests for the lightweight file-creation intent heuristic."""
 
@@ -351,17 +480,17 @@ class FileCreationIntentTests(unittest.TestCase):
         self._pos("hazme un archivo en src/index.js")
 
     def test_explicit_path_only(self):
-        # Una ruta sin verbo ya no activa intención de creación.
+        # Una ruta sin verbo ya no activa intenciÃ³n de creaciÃ³n.
         self._neg("ponlo en utils/helpers.py")
 
     def test_spanish_verb_archivo(self):
-        self._pos("créame un archivo en esa carpeta")
+        self._pos("crÃ©ame un archivo en esa carpeta")
 
     def test_spanish_verb_script(self):
         self._pos("crea un script que lea el CSV")
 
     def test_spanish_guardar(self):
-        self._pos("guárdalo en la carpeta scripts")
+        self._pos("guÃ¡rdalo en la carpeta scripts")
 
     def test_english_create_file(self):
         self._pos("create a file called app.py")
@@ -373,7 +502,7 @@ class FileCreationIntentTests(unittest.TestCase):
         self._pos("save it to data/output.csv")
 
     def test_yaml_extension(self):
-        self._pos("genera un docker-compose.yml en el directorio raíz")
+        self._pos("genera un docker-compose.yml en el directorio raÃ­z")
 
     def test_json_extension(self):
         self._pos("crea config/settings.json con estas claves")
@@ -381,16 +510,16 @@ class FileCreationIntentTests(unittest.TestCase):
     # --- negative cases ---
 
     def test_greeting_no_intent(self):
-        self._neg("hola, ¿cómo estás?")
+        self._neg("hola, Â¿cÃ³mo estÃ¡s?")
 
     def test_explain_code_no_intent(self):
-        self._neg("explícame qué hace esta función")
+        self._neg("explÃ­came quÃ© hace esta funciÃ³n")
 
     def test_show_code_no_intent(self):
-        self._neg("muéstrame un ejemplo de cómo usar argparse")
+        self._neg("muÃ©strame un ejemplo de cÃ³mo usar argparse")
 
     def test_question_no_intent(self):
-        self._neg("¿qué es un decorador en Python?")
+        self._neg("Â¿quÃ© es un decorador en Python?")
 
     def test_version_number_no_false_positive(self):
         # "3.10" should not match a source-file extension.
@@ -400,7 +529,7 @@ class FileCreationIntentTests(unittest.TestCase):
         self._neg("ejecuta los tests y dime si pasan")
 
 
-# ── File-creation recovery (agent loop) ──────────────────────────────────────
+# â”€â”€ File-creation recovery (agent loop) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 class FileCreationRecoveryTests(unittest.TestCase):
     """Integration-style tests for the agent's file-creation recovery path.
 
@@ -454,7 +583,7 @@ class FileCreationRecoveryTests(unittest.TestCase):
             call_count[0] += 1
             if call_count[0] == 1:
                 # First call: model returns plain code text, no tool call.
-                return "Aquí está el código:\n```python\nprint('hello')\n```", []
+                return "AquÃ­ estÃ¡ el cÃ³digo:\n```python\nprint('hello')\n```", []
             elif call_count[0] == 2:
                 # Second call (after recovery nudge): model uses write_file.
                 return "", [{
@@ -510,38 +639,108 @@ class FileCreationRecoveryTests(unittest.TestCase):
                 if _file_intent and not _file_created and not _recovery_done:
                     _recovery_done = True
                     recovery = (
-                        "No creaste el archivo — respondiste con texto. "
-                        "Usa write_file() ahora para crear el archivo en la ruta que indicó el usuario. "
+                        "No creaste el archivo â€” respondiste con texto. "
+                        "Usa write_file() ahora para crear el archivo en la ruta que indicÃ³ el usuario. "
                         "Si el directorio no existe dentro del workspace, usa create_directory() primero."
                     )
                     agent.messages.append({"role": "user", "content": recovery})
                     continue
                 break
 
+
         self.assertTrue(target.exists(), f"File should exist at {target}")
         self.assertEqual(target.read_text(encoding="utf-8"), content)
         self.assertTrue(_file_created)
-        self.assertEqual(call_count[0], 3, "Should have called _stream_response 3 times (plain text → recovery → write_file → confirmation)")
+        self.assertEqual(call_count[0], 3)
 
     def test_no_recovery_for_conversational_reply(self):
-        """A normal conversational user turn must not trigger the recovery path."""
-        _file_intent = base_agent.detect_file_creation_intent("¿qué es un decorador en Python?")
-        self.assertFalse(_file_intent)
-        # No recovery would be triggered since intent is False.
+        self.assertFalse(base_agent.detect_file_creation_intent("Â¿quÃ© es un decorador en Python?"))
 
     def test_path_safety_still_holds_on_write(self):
-        """write_file must not create files outside the workspace even during recovery."""
         outside = str(self._tmp_root.parent / "outside.py")
         result = base_agent.write_file(outside, "evil")
         self.assertIn("error", result)
 
     def test_explicit_path_request_lands_in_correct_dir(self):
-        """write_file with a subdirectory path auto-creates the directory."""
         result = base_agent.write_file("subdir/app.js", "console.log('ok');\n")
         self.assertIn("success", result)
         expected = self._tmp / "subdir" / "app.js"
         self.assertTrue(expected.exists())
         self.assertIn("ok", expected.read_text())
+
+    def test_file_creation_verification_uses_resolved_placeholder_path(self):
+        user_input = "crea un script en {{ desktop }}/script.py"
+        candidates = base_agent.extract_candidate_paths(user_input)
+        self.assertEqual(candidates[0], "{{ desktop }}/script.py")
+
+        expected = base_agent.resolve_in_workspace(candidates[0]).resolve()
+        result = base_agent.write_file("{{ desktop }}/script.py", "print('ok')\n")
+        self.assertIn("success", result)
+        resolved_target = base_agent.resolve_in_workspace(result["path"]).resolve()
+        self.assertEqual(resolved_target, expected)
+        self.assertTrue(expected.exists())
+
+
+class MultiRoleHeuristicTests(unittest.TestCase):
+    def test_planner_triggers_for_multi_step_repo_task(self):
+        self.assertTrue(
+            base_agent.should_plan_task(
+                "refactor src/agent.py and src/base_agent.py, then run tests and verify the new files"
+            )
+        )
+
+    def test_planner_skips_trivial_task(self):
+        self.assertFalse(base_agent.should_plan_task("lee README.md"))
+
+    def test_verifier_triggers_for_file_creation(self):
+        self.assertTrue(base_agent.should_verify_task("crea src/app.py", []))
+
+    def test_requested_test_validation_detects_test_intent(self):
+        self.assertTrue(base_agent.requested_test_validation("ejecuta los tests y verifica el resultado"))
+
+
+class VerificationHelperTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp_root = ROOT / ".tmp-tests"
+        self._tmp_root.mkdir(exist_ok=True)
+        self._tmp = self._tmp_root / f"verify-{uuid.uuid4().hex}"
+        self._tmp.mkdir()
+        base_agent.sync_work_dir(str(self._tmp))
+
+    def tearDown(self):
+        base_agent.sync_work_dir(str(ROOT))
+        shutil.rmtree(self._tmp_root, ignore_errors=True)
+
+    def test_verifier_catches_missing_artifact(self):
+        report = base_agent.verify_workspace_changes(expected_paths=["missing.py"])
+        self.assertFalse(report.ok)
+        self.assertTrue(any("no existe" in err for err in report.errors))
+
+    def test_verifier_catches_unchanged_edit(self):
+        path = self._tmp / "demo.py"
+        path.write_text("print('hola')\n", encoding="utf-8")
+        before = base_agent.snapshot_workspace_files(["demo.py"])
+        report = base_agent.verify_workspace_changes(
+            changed_paths=["demo.py"],
+            before_snapshots=before,
+        )
+        self.assertTrue(report.ok)
+        self.assertTrue(any("sin cambios detectables" in warning for warning in report.warnings))
+
+    def test_verifier_flags_failed_tests(self):
+        report = base_agent.verify_workspace_changes(
+            test_results=[{"returncode": 1, "stderr": "AssertionError: boom"}],
+            require_tests=True,
+        )
+        self.assertFalse(report.ok)
+        self.assertTrue(any("tests fallaron" in err for err in report.errors))
+
+    def test_recovery_instruction_includes_verification_failure(self):
+        report = base_agent.verify_workspace_changes(expected_paths=["missing.py"])
+        message = base_agent.build_recovery_instruction("La verificacion fallo.", report)
+        self.assertIn("verific", message.lower())
+        self.assertIn("missing.py", message)
+
 
 
 if __name__ == "__main__":

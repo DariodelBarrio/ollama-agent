@@ -16,7 +16,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Optional
 
-from common_runtime import build_shell_command, is_safe_command, resolve_in_root
+from common_runtime import build_shell_command, is_read_only_command, is_safe_command, resolve_in_root
 
 try:
     import requests
@@ -60,15 +60,33 @@ class ToolRuntime:
     El runtime guarda `work_dir` y `root_dir` para que los agentes puedan
     cambiar de directorio sin perder el perímetro de seguridad.
     """
-    def __init__(self, work_dir: str = ".", root_dir: Optional[str] = None, os_name: Optional[str] = None):
+    def __init__(
+        self,
+        work_dir: str = ".",
+        root_dir: Optional[str] = None,
+        os_name: Optional[str] = None,
+        read_only: bool = False,
+    ):
         self.os_name = os_name or platform.system()
         self.work_dir = str(Path(work_dir).resolve())
         self.root_dir = str(Path(root_dir).resolve()) if root_dir else self.work_dir
+        self.read_only = read_only
 
     def set_workspace(self, work_dir: str, root_dir: Optional[str] = None) -> None:
         """Actualiza el directorio actual y el límite raíz permitido."""
         self.work_dir = str(Path(work_dir).resolve())
         self.root_dir = str(Path(root_dir).resolve()) if root_dir else self.work_dir
+
+    def set_mode(self, read_only: bool = False) -> None:
+        self.read_only = read_only
+
+    def _read_only_error(self, action: str) -> dict:
+        return {
+            "error": (
+                f"Modo solo lectura activo: '{action}' estÃ¡ bloqueado. "
+                "Solo se permiten lectura, bÃºsqueda, listado y shell de inspecciÃ³n."
+            )
+        }
 
     def resolve(self, path: str) -> Path:
         """Resuelve una ruta dentro del workspace validando escapes."""
@@ -80,6 +98,10 @@ class ToolRuntime:
             ok, reason = is_safe_command(command)
             if not ok:
                 return {"error": reason}
+            if self.read_only:
+                ok, reason = is_read_only_command(command)
+                if not ok:
+                    return {"error": reason}
             cmd, effective_shell = build_shell_command(shell, command, self.os_name)
             result = subprocess.run(
                 cmd,
@@ -123,6 +145,8 @@ class ToolRuntime:
     def write_file(self, path: str, content: str) -> dict:
         """Escribe un archivo completo creando directorios intermedios si faltan."""
         try:
+            if self.read_only:
+                return self._read_only_error("write_file")
             encoded = content.encode("utf-8")
             if len(encoded) > self._MAX_WRITE_BYTES:
                 return {
@@ -180,6 +204,8 @@ class ToolRuntime:
         Returns a unified-diff summary on success.
         """
         try:
+            if self.read_only:
+                return self._read_only_error("edit_file")
             resolved = self.resolve(path)
             if not resolved.exists():
                 return {"error": f"Archivo no encontrado: {path}"}
@@ -367,6 +393,8 @@ class ToolRuntime:
     def delete_file(self, path: str) -> dict:
         """Elimina un archivo o directorio dentro del workspace permitido."""
         try:
+            if self.read_only:
+                return self._read_only_error("delete_file")
             resolved = self.resolve(path)
             if not resolved.exists():
                 return {"error": f"No existe: {path}"}
@@ -384,6 +412,8 @@ class ToolRuntime:
     def create_directory(self, path: str) -> dict:
         """Crea un directorio y sus padres si no existen."""
         try:
+            if self.read_only:
+                return self._read_only_error("create_directory")
             resolved = self.resolve(path)
             resolved.mkdir(parents=True, exist_ok=True)
             return {"success": True, "path": str(resolved)}
@@ -393,6 +423,8 @@ class ToolRuntime:
     def move_file(self, src: str, dst: str) -> dict:
         """Mueve o renombra una ruta manteniéndose dentro del workspace."""
         try:
+            if self.read_only:
+                return self._read_only_error("move_file")
             source = self.resolve(src)
             target = self.resolve(dst)
             if not source.exists():
@@ -448,10 +480,7 @@ class ToolRuntime:
     def change_directory(self, path: str) -> dict:
         """Actualiza el `cwd` activo sin permitir salir de `root_dir`."""
         try:
-            candidate = Path(path)
-            if not candidate.is_absolute():
-                candidate = Path(self.work_dir) / candidate
-            resolved = resolve_in_root(str(candidate.resolve()), self.work_dir, self.root_dir)
+            resolved = self.resolve(path)
             if not resolved.exists():
                 return {"error": f"Directorio no encontrado: {path}"}
             if not resolved.is_dir():
@@ -652,13 +681,26 @@ _WEB_TOOL_DEFINITIONS = [
 ]
 
 
-def build_tool_definitions(include_web: bool = True, extra_tools: Optional[list[dict]] = None) -> list[dict]:
+_MUTATING_TOOL_NAMES = {"write_file", "edit_file", "delete_file", "create_directory", "move_file"}
+
+
+def build_tool_definitions(
+    include_web: bool = True,
+    extra_tools: Optional[list[dict]] = None,
+    read_only: bool = False,
+) -> list[dict]:
     """Construye la lista final de tools publicada al modelo.
 
     Se clona la definición base para evitar que un agente mutile estructuras
     compartidas entre sesiones o entre backends.
     """
     tools = deepcopy(_BASE_TOOL_DEFINITIONS)
+    if read_only:
+        tools = [
+            tool
+            for tool in tools
+            if tool.get("function", {}).get("name") not in _MUTATING_TOOL_NAMES
+        ]
     if include_web and WEB_AVAILABLE:
         tools.extend(deepcopy(_WEB_TOOL_DEFINITIONS))
     if extra_tools:

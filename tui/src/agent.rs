@@ -14,6 +14,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const MAX_LOG_LINES: usize = 400;
+const MAX_RECENT_TOOLS: usize = 8;
 // Small batches cut redraw churn without turning the launcher into a delayed
 // "buffered terminal". The window is short enough to keep output feeling live.
 const OUTPUT_BATCH_LINES: usize = 8;
@@ -24,11 +25,19 @@ pub enum SessionEvent {
     OutputBatch(Vec<String>),
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecentTool {
+    pub title: String,
+    pub target: String,
+    pub result: String,
+}
+
 pub struct AgentSession {
     child: Child,
     stdin: Option<ChildStdin>,
     rx: Receiver<SessionEvent>,
     pub lines: VecDeque<String>,
+    pub recent_tools: VecDeque<RecentTool>,
     changed_since_poll: bool,
 }
 
@@ -41,8 +50,14 @@ impl AgentSession {
 
         let mut child = cmd.spawn().map_err(|e| e.to_string())?;
         let stdin = child.stdin.take();
-        let stdout = child.stdout.take().ok_or_else(|| "No se pudo capturar stdout".to_string())?;
-        let stderr = child.stderr.take().ok_or_else(|| "No se pudo capturar stderr".to_string())?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "No se pudo capturar stdout".to_string())?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| "No se pudo capturar stderr".to_string())?;
 
         let (tx, rx) = mpsc::channel();
 
@@ -53,6 +68,7 @@ impl AgentSession {
             stdin,
             rx,
             lines: VecDeque::new(),
+            recent_tools: VecDeque::new(),
             changed_since_poll: false,
         })
     }
@@ -73,8 +89,13 @@ impl AgentSession {
     }
 
     pub fn send_line(&mut self, line: &str) -> Result<(), String> {
-        let stdin = self.stdin.as_mut().ok_or_else(|| "La sesión no acepta más entrada".to_string())?;
-        stdin.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| "La sesión no acepta más entrada".to_string())?;
+        stdin
+            .write_all(line.as_bytes())
+            .map_err(|e| e.to_string())?;
         stdin.write_all(b"\n").map_err(|e| e.to_string())?;
         stdin.flush().map_err(|e| e.to_string())
     }
@@ -89,6 +110,19 @@ impl AgentSession {
         }
         self.changed_since_poll = true;
         for line in lines {
+            if line.starts_with("[tool] ")
+                || line.starts_with("[tool-result] ")
+                || line.starts_with("[role] ")
+                || line.starts_with("[role-result] ")
+            {
+                if let Some(tool) = parse_recent_line(&line, self.recent_tools.back_mut()) {
+                    if self.recent_tools.len() >= MAX_RECENT_TOOLS {
+                        self.recent_tools.pop_front();
+                    }
+                    self.recent_tools.push_back(tool);
+                }
+                continue;
+            }
             if self.lines.len() >= MAX_LOG_LINES {
                 self.lines.pop_front();
             }
@@ -99,6 +133,74 @@ impl AgentSession {
     pub fn last_event_changed(&self) -> bool {
         self.changed_since_poll
     }
+}
+
+fn parse_recent_line(line: &str, pending: Option<&mut RecentTool>) -> Option<RecentTool> {
+    if let Some(rest) = line.strip_prefix("[tool] ") {
+        let mut parts = rest.splitn(2, " | ");
+        let title = parts.next().unwrap_or("").trim().to_string();
+        let target = parts.next().unwrap_or("").trim().to_string();
+        return Some(RecentTool {
+            title,
+            target,
+            result: "running".into(),
+        });
+    }
+    if let Some(rest) = line.strip_prefix("[tool-result] ") {
+        let mut parts = rest.splitn(2, " | ");
+        let status = parts.next().unwrap_or("").trim();
+        let summary = parts.next().unwrap_or("").trim().to_string();
+        if let Some(tool) = pending {
+            tool.result = if summary.is_empty() {
+                status.into()
+            } else {
+                format!("{status}: {summary}")
+            };
+            return None;
+        }
+        return Some(RecentTool {
+            title: "result".into(),
+            target: String::new(),
+            result: if summary.is_empty() {
+                status.into()
+            } else {
+                format!("{status}: {summary}")
+            },
+        });
+    }
+    if let Some(rest) = line.strip_prefix("[role] ") {
+        let mut parts = rest.splitn(2, " | ");
+        let title = parts.next().unwrap_or("").trim().to_uppercase();
+        let target = parts.next().unwrap_or("").trim().to_string();
+        return Some(RecentTool {
+            title,
+            target,
+            result: "running".into(),
+        });
+    }
+    if let Some(rest) = line.strip_prefix("[role-result] ") {
+        let mut parts = rest.splitn(2, " | ");
+        let status = parts.next().unwrap_or("").trim().to_string();
+        let summary = parts.next().unwrap_or("").trim().to_string();
+        if let Some(tool) = pending {
+            tool.result = if summary.is_empty() {
+                status.clone()
+            } else {
+                format!("{status}: {summary}")
+            };
+            return None;
+        }
+        return Some(RecentTool {
+            title: "ROLE".into(),
+            target: String::new(),
+            result: if summary.is_empty() {
+                status
+            } else {
+                format!("{status}: {summary}")
+            },
+        });
+    }
+    None
 }
 
 fn spawn_reader<T>(stream: T, tx: Sender<SessionEvent>, is_stderr: bool)
@@ -120,7 +222,9 @@ where
                         text
                     };
                     batch.push(rendered);
-                    if batch.len() >= OUTPUT_BATCH_LINES || last_flush.elapsed() >= OUTPUT_BATCH_WINDOW {
+                    if batch.len() >= OUTPUT_BATCH_LINES
+                        || last_flush.elapsed() >= OUTPUT_BATCH_WINDOW
+                    {
                         flush_batch(&tx, &mut batch);
                         last_flush = Instant::now();
                     }
@@ -170,14 +274,41 @@ pub fn find_python() -> (String, Vec<String>) {
 fn python_path_candidates() -> Vec<String> {
     let mut out = Vec::new();
     if let Ok(cwd) = std::env::current_dir() {
-        out.push(cwd.join(".venv").join("Scripts").join("python.exe").to_string_lossy().to_string());
-        out.push(cwd.join("venv").join("Scripts").join("python.exe").to_string_lossy().to_string());
+        out.push(
+            cwd.join(".venv")
+                .join("Scripts")
+                .join("python.exe")
+                .to_string_lossy()
+                .to_string(),
+        );
+        out.push(
+            cwd.join("venv")
+                .join("Scripts")
+                .join("python.exe")
+                .to_string_lossy()
+                .to_string(),
+        );
     }
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
         let local = PathBuf::from(local);
-        out.push(local.join("Python").join("bin").join("python.exe").to_string_lossy().to_string());
+        out.push(
+            local
+                .join("Python")
+                .join("bin")
+                .join("python.exe")
+                .to_string_lossy()
+                .to_string(),
+        );
         for version in ["Python312", "Python311", "Python310", "Python39"] {
-            out.push(local.join("Programs").join("Python").join(version).join("python.exe").to_string_lossy().to_string());
+            out.push(
+                local
+                    .join("Programs")
+                    .join("Python")
+                    .join(version)
+                    .join("python.exe")
+                    .to_string_lossy()
+                    .to_string(),
+            );
         }
     }
     out
@@ -233,6 +364,12 @@ pub fn build_command(profile: &Profile, repo_root: &Path) -> Command {
     match profile.variant {
         Variant::Local => {
             cmd.arg("--api-base").arg(&profile.api_base);
+            if profile.read_only {
+                cmd.arg("--read-only");
+            }
+            if profile.guided_mode {
+                cmd.arg("--guided-mode");
+            }
             cmd.env("OLLAMA_AGENT_SIMPLE_INPUT", "1");
         }
         Variant::Hybrid => {
@@ -250,6 +387,12 @@ pub fn build_command(profile: &Profile, repo_root: &Path) -> Command {
             }
             if profile.critic {
                 cmd.arg("--critic");
+            }
+            if profile.read_only {
+                cmd.arg("--read-only");
+            }
+            if profile.guided_mode {
+                cmd.arg("--guided-mode");
             }
             if !profile.sandbox.trim().is_empty() {
                 cmd.arg("--sandbox").arg(&profile.sandbox);
@@ -281,4 +424,38 @@ pub fn command_preview(profile: &Profile, repo_root: &Path) -> String {
         .map(|a| a.to_string_lossy().to_string())
         .collect();
     format!("{} {}", prog, args.join(" "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_recent_line, RecentTool};
+
+    #[test]
+    fn tool_call_line_creates_recent_tool_entry() {
+        let parsed = parse_recent_line("[tool] Read | README.md", None).unwrap();
+        assert_eq!(parsed.title, "Read");
+        assert_eq!(parsed.target, "README.md");
+        assert_eq!(parsed.result, "running");
+    }
+
+    #[test]
+    fn tool_result_updates_pending_entry() {
+        let mut recent = RecentTool {
+            title: "Read".into(),
+            target: "README.md".into(),
+            result: "running".into(),
+        };
+        let parsed =
+            parse_recent_line("[tool-result] ok | 14 lines | README.md", Some(&mut recent));
+        assert!(parsed.is_none());
+        assert_eq!(recent.result, "ok: 14 lines | README.md");
+    }
+
+    #[test]
+    fn role_line_creates_recent_action_entry() {
+        let parsed = parse_recent_line("[role] planner | multi-file refactor", None).unwrap();
+        assert_eq!(parsed.title, "PLANNER");
+        assert_eq!(parsed.target, "multi-file refactor");
+        assert_eq!(parsed.result, "running");
+    }
 }

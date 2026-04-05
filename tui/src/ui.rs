@@ -1,11 +1,14 @@
 //! Ratatui rendering for the launcher.
 
 use ratatui::{
-    Frame,
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap},
+    widgets::{
+        Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Scrollbar,
+        ScrollbarOrientation, ScrollbarState, Wrap,
+    },
+    Frame,
 };
 
 use crate::app::{
@@ -49,8 +52,14 @@ pub fn render(app: &App, frame: &mut Frame) {
 
 fn render_header(app: &App, frame: &mut Frame, area: Rect) {
     let variant_span = match app.profile.variant {
-        Variant::Local => Span::styled(" Local ", Style::default().fg(C_LOCAL).add_modifier(Modifier::BOLD)),
-        Variant::Hybrid => Span::styled(" Hybrid ", Style::default().fg(C_HYBRID).add_modifier(Modifier::BOLD)),
+        Variant::Local => Span::styled(
+            " Local ",
+            Style::default().fg(C_LOCAL).add_modifier(Modifier::BOLD),
+        ),
+        Variant::Hybrid => Span::styled(
+            " Hybrid ",
+            Style::default().fg(C_HYBRID).add_modifier(Modifier::BOLD),
+        ),
     };
     let screen = match app.screen {
         Screen::MainMenu => "launcher",
@@ -60,14 +69,24 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
         Screen::Session => "session",
     };
     let line = Line::from(vec![
-        Span::styled("ollama-agent", Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "ollama-agent",
+            Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" tui  ", Style::default().fg(C_DIM)),
         variant_span,
-        Span::styled(format!("  {}  ", app.profile.model), Style::default().fg(C_DIM)),
+        Span::styled(
+            format!("  {}  ", app.profile.model),
+            Style::default().fg(C_DIM),
+        ),
         Span::styled(screen, Style::default().fg(C_DIM)),
     ]);
     frame.render_widget(
-        Paragraph::new(line).block(Block::default().borders(Borders::BOTTOM).border_style(Style::default().fg(C_BORDER))),
+        Paragraph::new(line).block(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .border_style(Style::default().fg(C_BORDER)),
+        ),
         area,
     );
 }
@@ -76,20 +95,14 @@ fn render_statusbar(app: &App, frame: &mut Frame, area: Rect) {
     let (text, color) = if let Some((msg, is_err)) = &app.status {
         (msg.as_str(), if *is_err { C_ERR } else { C_OK })
     } else {
-        let hint = match app.screen {
-            Screen::MainMenu => "j/k navegar  Enter abrir  q salir",
-            Screen::Configure => {
-                "Tab campo  Enter editar  F3 modelos  F4 preset GPU  F5 lanzar  F2 guardar  Esc volver"
-            }
-            Screen::Models => "j/k navegar  Enter usar  g recomendado  p pull  d borrar  r refrescar  Esc volver",
-            Screen::Profiles => "j/k navegar  Enter cargar  d borrar  Esc volver",
-            Screen::Session => "Escribir directo  Enter enviar  F6 detener  Flechas/PgUp/PgDn scroll  End seguir  Esc volver",
-        };
-        (hint, C_DIM)
+        (app.current_screen_hint(), C_DIM)
     };
     frame.render_widget(
-        Paragraph::new(Span::styled(text, Style::default().fg(color)))
-            .block(Block::default().borders(Borders::TOP).border_style(Style::default().fg(C_BORDER))),
+        Paragraph::new(Span::styled(text, Style::default().fg(color))).block(
+            Block::default()
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(C_BORDER)),
+        ),
         area,
     );
 }
@@ -111,7 +124,10 @@ fn render_main_menu(app: &App, frame: &mut Frame, area: Rect) {
         .map(|(idx, label, color)| {
             let selected = app.menu_idx == *idx;
             let style = if selected {
-                Style::default().fg(BG).bg(*color).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(BG)
+                    .bg(*color)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(*color)
             };
@@ -120,7 +136,10 @@ fn render_main_menu(app: &App, frame: &mut Frame, area: Rect) {
         .collect();
 
     let block = Block::default()
-        .title(Span::styled(" Ollama Agent TUI ", Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(
+            " Ollama Agent TUI ",
+            Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD),
+        ))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(C_BORDER));
@@ -141,15 +160,21 @@ fn render_configure(app: &App, frame: &mut Frame, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let [fields_area, preview_area] = Layout::vertical([Constraint::Min(0), Constraint::Length(7)])
+    let [fields_area, preview_area] = Layout::vertical([Constraint::Min(0), Constraint::Length(9)])
         .margin(1)
         .areas(inner);
 
     let row_height = 2;
     let visible = (fields_area.height / row_height).max(1) as usize;
-    let start = if app.field_idx >= visible { app.field_idx + 1 - visible } else { 0 };
+    let start = if app.field_idx >= visible {
+        app.field_idx + 1 - visible
+    } else {
+        0
+    };
     let end = (start + visible).min(app.fields.len());
-    let constraints: Vec<Constraint> = (start..end).map(|_| Constraint::Length(row_height)).collect();
+    let constraints: Vec<Constraint> = (start..end)
+        .map(|_| Constraint::Length(row_height))
+        .collect();
     let rows = Layout::vertical(constraints).split(fields_area);
 
     for (i, (field, row)) in app.fields[start..end].iter().zip(rows.iter()).enumerate() {
@@ -196,18 +221,31 @@ fn render_configure(app: &App, frame: &mut Frame, area: Rect) {
         frame.render_widget(Paragraph::new(line), *row);
     }
 
+    let preflight = app
+        .preflight_report
+        .as_ref()
+        .map(|report| report.detail_lines().join("\n"))
+        .unwrap_or_else(|| "preflight: pulsa F8 para validar backend y sandbox".into());
     let preview = Paragraph::new(format!(
-        "{}\ncmd: {}",
-        app.configure_preview_detail, app.configure_preview_command
+        "{}\n{}\ncmd: {}",
+        app.configure_preview_detail, preflight, app.configure_preview_command
     ))
     .wrap(Wrap { trim: false })
-    .block(Block::default().title(" Launch Preview ").borders(Borders::TOP).border_style(Style::default().fg(C_BORDER)));
+    .block(
+        Block::default()
+            .title(" Launch Preview ")
+            .borders(Borders::TOP)
+            .border_style(Style::default().fg(C_BORDER)),
+    );
     frame.render_widget(preview, preview_area);
 }
 
 fn render_models(app: &App, frame: &mut Frame, area: Rect) {
     let block = Block::default()
-        .title(Span::styled(" Local Models ", Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(
+            " Local Models ",
+            Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD),
+        ))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(C_BORDER));
@@ -236,20 +274,31 @@ fn render_models(app: &App, frame: &mut Frame, area: Rect) {
     .block(Block::default().title(" Backend ").borders(Borders::ALL).border_style(Style::default().fg(C_BORDER)));
     frame.render_widget(meta, meta_area);
 
-    let [models_area, logs_area] = Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).areas(content_area);
+    let [models_area, logs_area] =
+        Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)])
+            .areas(content_area);
 
     let model_items: Vec<ListItem> = if app.models.is_empty() {
-        vec![ListItem::new(Span::styled("  (sin modelos listados)", Style::default().fg(C_DIM)))]
+        vec![ListItem::new(Span::styled(
+            "  (sin modelos listados)",
+            Style::default().fg(C_DIM),
+        ))]
     } else {
         app.models
             .iter()
             .enumerate()
             .map(|(idx, model)| {
                 let selected = idx == app.model_idx;
-                let size = model.size_bytes.map(human_bytes).unwrap_or_else(|| "?".into());
+                let size = model
+                    .size_bytes
+                    .map(human_bytes)
+                    .unwrap_or_else(|| "?".into());
                 let stamp = model.modified_at.as_deref().unwrap_or("sin fecha");
                 let style = if selected {
-                    Style::default().fg(BG).bg(C_SELECT).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(BG)
+                        .bg(C_SELECT)
+                        .add_modifier(Modifier::BOLD)
                 } else if model.name == app.profile.model {
                     Style::default().fg(C_LOCAL).add_modifier(Modifier::BOLD)
                 } else {
@@ -270,12 +319,18 @@ fn render_models(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(List::new(model_items).block(models_block), models_area);
 
     let logs_block = Block::default()
-        .title(if app.model_task_running { " Model Activity " } else { " Model Log " })
+        .title(if app.model_task_running {
+            " Model Activity "
+        } else {
+            " Model Log "
+        })
         .borders(Borders::ALL)
         .border_style(Style::default().fg(C_BORDER));
     let visible_log_height = logs_area.height.saturating_sub(2);
     frame.render_widget(
-        Paragraph::new(app.model_window_text(visible_log_height)).wrap(Wrap { trim: false }).block(logs_block),
+        Paragraph::new(app.model_window_text(visible_log_height))
+            .wrap(Wrap { trim: false })
+            .block(logs_block),
         logs_area,
     );
 
@@ -291,8 +346,12 @@ fn render_models(app: &App, frame: &mut Frame, area: Rect) {
     } else {
         app.model_input_buffer.clone()
     };
-    let input = Paragraph::new(Span::styled(input_text, input_style))
-        .block(Block::default().title(" Pull Model ").borders(Borders::ALL).border_style(Style::default().fg(C_BORDER)));
+    let input = Paragraph::new(Span::styled(input_text, input_style)).block(
+        Block::default()
+            .title(" Pull Model ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(C_BORDER)),
+    );
     frame.render_widget(input, input_area);
 }
 
@@ -301,7 +360,10 @@ fn render_profiles(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(Clear, popup);
 
     let items: Vec<ListItem> = if app.store.profiles.is_empty() {
-        vec![ListItem::new(Span::styled("  (sin perfiles guardados)", Style::default().fg(C_DIM)))]
+        vec![ListItem::new(Span::styled(
+            "  (sin perfiles guardados)",
+            Style::default().fg(C_DIM),
+        ))]
     } else {
         app.store
             .profiles
@@ -310,14 +372,24 @@ fn render_profiles(app: &App, frame: &mut Frame, area: Rect) {
             .map(|(i, p)| {
                 let selected = i == app.profile_idx;
                 let style = if selected {
-                    Style::default().fg(BG).bg(C_SELECT).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(BG)
+                        .bg(C_SELECT)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::White)
                 };
-                let variant_color = if p.variant == Variant::Local { C_LOCAL } else { C_HYBRID };
+                let variant_color = if p.variant == Variant::Local {
+                    C_LOCAL
+                } else {
+                    C_HYBRID
+                };
                 ListItem::new(Line::from(vec![
                     Span::styled(format!("{:<16}", p.name), style),
-                    Span::styled(format!(" {} ", p.variant.label()), Style::default().fg(variant_color)),
+                    Span::styled(
+                        format!(" {} ", p.variant.label()),
+                        Style::default().fg(variant_color),
+                    ),
                     Span::styled(format!(" {}", p.model), Style::default().fg(C_DIM)),
                 ]))
             })
@@ -325,7 +397,10 @@ fn render_profiles(app: &App, frame: &mut Frame, area: Rect) {
     };
 
     let block = Block::default()
-        .title(Span::styled(" Profiles ", Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(
+            " Profiles ",
+            Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD),
+        ))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(C_BORDER));
@@ -342,27 +417,79 @@ fn render_session(app: &App, frame: &mut Frame, area: Rect) {
     .areas(area);
 
     let meta = Paragraph::new(format!(
-        "{}\nworkdir: {}\nEnter enviar · F6 stop · Esc return to config",
-        app.session_command_preview, app.session_work_dir_preview,
+        "{}\nEnter enviar · F6 stop · Esc return to config",
+        app.session_meta_text(),
     ))
     .wrap(Wrap { trim: false })
-    .block(Block::default().title(" Session ").borders(Borders::ALL).border_style(Style::default().fg(C_BORDER)));
+    .block(
+        Block::default()
+            .title(" Session ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(C_BORDER)),
+    );
     frame.render_widget(meta, meta_area);
 
-    let visible_log_height = log_area.height.saturating_sub(2);
+    let [tool_area, output_area] = if log_area.width >= 96 {
+        Layout::horizontal([Constraint::Percentage(34), Constraint::Percentage(66)]).areas(log_area)
+    } else {
+        Layout::horizontal([Constraint::Percentage(0), Constraint::Percentage(100)]).areas(log_area)
+    };
+    if log_area.width >= 96 {
+        let visible_tool_height = tool_area.height.saturating_sub(2);
+        let tools = Paragraph::new(app.recent_tools_text(visible_tool_height))
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .title(" Recent Actions ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(C_BORDER)),
+            );
+        frame.render_widget(tools, tool_area);
+    }
+
+    let visible_log_height = output_area.height.saturating_sub(2);
     let log = Paragraph::new(app.session_window_text(visible_log_height))
         .wrap(Wrap { trim: false })
-        .block(Block::default().title(app.session_view_label()).borders(Borders::ALL).border_style(Style::default().fg(C_BORDER)));
-    frame.render_widget(log, log_area);
+        .block(
+            Block::default()
+                .title(app.session_view_label())
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(C_BORDER)),
+        );
+    frame.render_widget(log, output_area);
+    if let Some((total, position, viewport)) = app.session_scrollbar_metrics(visible_log_height) {
+        let mut scrollbar_state = ScrollbarState::new(total)
+            .position(position)
+            .viewport_content_length(viewport);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .track_symbol(Some("│"))
+            .thumb_symbol("█")
+            .begin_symbol(None)
+            .end_symbol(None)
+            .style(Style::default().fg(Color::Rgb(65, 65, 65)))
+            .thumb_style(Style::default().fg(Color::Rgb(190, 190, 190)));
+        frame.render_stateful_widget(scrollbar, output_area, &mut scrollbar_state);
+    }
 
     let input_style = Style::default().fg(Color::Black).bg(Color::White);
     let input_text = if app.input_buffer.is_empty() {
         "|".into()
     } else {
-        format!("{}|", app.input_buffer)
+        let mut text = app.input_buffer.clone();
+        let cursor = app.input_cursor.min(text.len());
+        text.insert(cursor, '|');
+        text
     };
-    let input = Paragraph::new(Span::styled(input_text, input_style))
-        .block(Block::default().title(" Input ").borders(Borders::ALL).border_style(Style::default().fg(C_BORDER)));
+    let input = Paragraph::new(Span::styled(input_text, input_style)).block(
+        Block::default()
+            .title(if app.session_mouse_mode {
+                " Input · mouse on "
+            } else {
+                " Input · mouse off "
+            })
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(C_BORDER)),
+    );
     frame.render_widget(input, input_area);
 }
 
@@ -386,5 +513,10 @@ fn centered(w: u16, h: u16, area: Rect) -> Rect {
     let h = h.min(area.height);
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
-    Rect { x, y, width: w, height: h }
+    Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    }
 }

@@ -30,6 +30,8 @@ The agent is designed for terminal-based coding tasks in a local repository:
 - run shell commands with application-level safety guards
 - use web search and URL fetch when enabled
 - keep an interactive coding loop with tool calls and streamed output
+- optionally run with a lightweight guided multi-role flow
+- optionally run in `read-only` mode for audit/exploration sessions
 
 It is not a hosted service, not a web GUI, and not a hardened sandbox.
 
@@ -38,7 +40,7 @@ It is not a hosted service, not a web GUI, and not a hardened sandbox.
 | Variant | Entry point | Intended use | Notes |
 |---|---|---|---|
 | Local | [`src/agent.py`](src/agent.py) | Pure local workflow against an OpenAI-compatible backend such as Ollama | Smallest setup, no Groq dependency |
-| Hybrid | [`src/hybrid/agent.py`](src/hybrid/agent.py) | Local workflow plus optional Groq routing, critic mode, AST scan, and persistent memory | More capable, but also more experimental |
+| Hybrid | [`src/hybrid/agent.py`](src/hybrid/agent.py) | Local workflow plus optional Groq routing, critic mode, AST scan, persistent memory, and guided verification | More capable, but also more experimental |
 
 ### Local vs Hybrid
 
@@ -114,6 +116,8 @@ Parameter semantics:
 - `--ctx` controls the backend token budget or context window hint, not a guaranteed output length.
 - `--api-base` and `--local-url` both mean an OpenAI-compatible local backend endpoint.
 - `--backend` in Hybrid chooses `auto`, `local`, `groq`, or `remote`.
+- `--read-only` blocks mutating filesystem tools and write-like shell commands.
+- `--guided-mode` enables a lightweight planner/executor/verifier/critic/recovery flow inside the existing agent loop.
 
 ## Usage
 
@@ -144,6 +148,18 @@ In Hybrid:
 - `--groq-model` is the explicit Groq fallback/override model.
 - `--local-url` is the local OpenAI-compatible endpoint.
 - `--remote-url` and `--remote-model` configure an extra OpenAI-compatible cloud backend when `--backend remote`.
+
+### Guided Mode
+
+`--guided-mode` keeps one acting agent loop but adds bounded role passes when they are useful:
+
+- `planner`: only on tasks that look multi-step, path-sensitive, or validation-heavy
+- `executor`: the normal tool-using loop
+- `verifier`: cheap filesystem and test postcondition checks after meaningful changes
+- `critic`: a short review pass after code changes
+- `recovery`: one focused retry instruction when verification or review catches a real miss
+
+This is intentionally not a swarm, not parallel orchestration, and not a second platform layer.
 
 Canonical launch paths in this repo:
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from string import Template
 from typing import Callable, Optional
+import re
 
 try:
     from jinja2 import Environment, FileSystemLoader, Undefined
@@ -120,6 +121,37 @@ def _jinja_env(loader=None) -> "Environment":
     )
 
 
+_FALLBACK_IF_RE = re.compile(
+    r"{%\s*if\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*%}(.*?){%\s*endif\s*%}",
+    re.DOTALL,
+)
+_FALLBACK_VAR_RE = re.compile(r"{{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*}}")
+
+
+def _render_jinja_like_fallback(raw_template: str, values: dict[str, str]) -> str:
+    """Render a tiny Jinja-like subset when Jinja2 is unavailable.
+
+    Supports:
+    - ``{{ variable }}``
+    - ``{% if variable %}...{% endif %}``
+    """
+    def _render_conditionals(text: str) -> str:
+        previous = None
+        while previous != text:
+            previous = text
+            text = _FALLBACK_IF_RE.sub(
+                lambda match: _render_conditionals(match.group(2))
+                if values.get(match.group(1), "")
+                else "",
+                text,
+            )
+        return text
+
+    rendered = _render_conditionals(raw_template)
+    rendered = _FALLBACK_VAR_RE.sub(lambda match: values.get(match.group(1), ""), rendered)
+    return rendered
+
+
 def render_prompt_template(template_name: str, **values: str) -> str:
     """Render a template from the prompts/ directory.
 
@@ -132,9 +164,11 @@ def render_prompt_template(template_name: str, **values: str) -> str:
         env = _jinja_env(FileSystemLoader(str(PROMPTS_DIR)))
         return env.get_template(template_name).render(**normalized)
 
-    # Fallback: string.Template
     template_path = PROMPTS_DIR / template_name
     raw_template = template_path.read_text(encoding="utf-8")
+    if any(token in raw_template for token in ("{{", "{%")):
+        return _render_jinja_like_fallback(raw_template, normalized)
+    # Fallback: string.Template
     return Template(raw_template).safe_substitute(**normalized)
 
 
@@ -165,6 +199,8 @@ def build_system_prompt(
             if JINJA2_AVAILABLE and any(token in raw_override for token in ("{{", "{%", "{#")):
                 env = _jinja_env()
                 return env.from_string(raw_override).render(**normalized)
+            if any(token in raw_override for token in ("{{", "{%")):
+                return _render_jinja_like_fallback(raw_override, normalized)
             # Legacy: $variable syntax
             return Template(raw_override).safe_substitute(**normalized)
         return render_prompt_template(template_name, **normalized)

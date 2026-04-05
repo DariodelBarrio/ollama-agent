@@ -15,12 +15,14 @@ The current TUI is intentionally small but useful:
 
 - choose `Local` or `Hybrid`
 - edit the main launch parameters
+- run fast preflight checks before launch
 - list local models
 - download local models
 - delete local models
 - save and load reusable profiles
 - launch the Python agent as a managed child process
 - watch live stdout/stderr in the TUI
+- inspect a compact recent-actions panel while the session runs
 - send line-based input to the running agent
 - stop the child process from the launcher
 
@@ -52,6 +54,8 @@ Both variants expose:
 - context window (`ctx`)
 - temperature
 - optional system prompt path
+- read-only mode
+- guided mode
 
 Hybrid also exposes:
 
@@ -142,6 +146,7 @@ Current session controls:
 
 - `F4`: apply the selected GPU recommendation to `model` and `ctx`
 - `F5`: launch
+- `F8`: run preflight checks without launching
 - `F2`: save current profile
 - type directly in the input box
 - `Enter`: send the current line
@@ -151,6 +156,29 @@ Current session controls:
 
 The session view follows live output by default. Scrolling up pauses follow
 mode; `End` jumps back to the bottom and resumes it.
+
+When guided mode is enabled, the launcher also surfaces role transitions in the
+same compact recent-actions panel used for tools. That makes it easier to see
+when the agent is planning, verifying, reviewing, or retrying without flooding
+the full output log.
+
+Preflight checks stay lightweight and block obviously broken launches:
+
+- Local: checks the configured local backend
+- Hybrid local/auto: checks the local backend
+- Hybrid remote: checks the configured remote backend and key
+- Hybrid Docker sandbox: checks Docker availability and image readiness
+
+Read-only mode is enforced in the Python runtime, not only in prompt text:
+
+- still allowed: read/list/grep/find/web lookup/change-directory
+- blocked: write/edit/move/delete/create-directory and mutating shell commands
+
+Guided mode stays lightweight:
+
+- one main Python agent still owns execution
+- planner/verifier/critic/recovery are short internal role passes, not long-lived sub-agents
+- trivial tasks still run without planner overhead
 
 ## Hybrid Cloud Providers
 

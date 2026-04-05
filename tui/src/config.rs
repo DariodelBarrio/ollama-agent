@@ -49,6 +49,8 @@ pub struct Profile {
     pub remote_model: String,
     pub remote_api_key: String,
     pub local_url: String,
+    pub read_only: bool,
+    pub guided_mode: bool,
     pub sandbox: String,
     pub sandbox_image: String,
 }
@@ -79,6 +81,8 @@ impl Default for Profile {
             remote_model: "gpt-4.1-mini".into(),
             remote_api_key: String::new(),
             local_url: "http://localhost:11434/v1".into(),
+            read_only: false,
+            guided_mode: true,
             sandbox: String::new(),
             sandbox_image: "python:3.12-slim".into(),
         }

@@ -30,6 +30,7 @@ class CliSmokeTests(unittest.TestCase):
         output = self._run_help("src/agent.py")
         self.assertIn("--model", output)
         self.assertIn("--api-base", output)
+        self.assertIn("--read-only", output)
 
     def test_hybrid_agent_help(self):
         output = self._run_help("src/hybrid/agent.py")
@@ -37,6 +38,7 @@ class CliSmokeTests(unittest.TestCase):
         self.assertIn("--critic", output)
         self.assertIn("--remote-url", output)
         self.assertIn("--remote-model", output)
+        self.assertIn("--read-only", output)
 
     def test_install_script_help(self):
         output = self._run_help("scripts/install.py")

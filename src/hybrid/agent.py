@@ -30,7 +30,7 @@ from base_agent import (
     C_LOGO, C_BORDER, C_TEXT, C_ROUTER, C_CRITIC,
     console,
     _JsonFmt, make_logger as _make_logger,
-    sync_work_dir, get_work_dir,
+    sync_work_dir, get_work_dir, build_agent_tools,
     run_command, read_file, write_file, edit_file, find_files, grep,
     list_directory, delete_file, create_directory, move_file,
     search_web, fetch_url, change_directory,
@@ -38,7 +38,17 @@ from base_agent import (
     extract_tool_calls_from_text,
     detect_file_creation_intent,
     extract_candidate_paths,
+    get_workspace_placeholder_targets,
     resolve_in_workspace,
+    should_plan_task,
+    should_verify_task,
+    requested_test_validation,
+    emit_role_event,
+    emit_role_result,
+    summarize_text,
+    snapshot_workspace_files,
+    verify_workspace_changes,
+    build_recovery_instruction,
     _render_inline, _TOOL_LABELS, _rel,
     print_tool_call, print_tool_result,
 )
@@ -268,8 +278,27 @@ class MemoryDB:
         except Exception:
             return []
 
-    def format_for_prompt(self) -> str:
-        mems = self.top(12)
+    def select_for_context(self, query: str = "", limit: int = 8) -> list:
+        """Prioriza memorias relevantes al turno y rellena con memorias top sin repetir."""
+        selected: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+        if query and len(query.strip()) >= 3:
+            for item in self.search(query, limit=max(2, limit // 2)):
+                key = (item["category"], item["key"])
+                if key not in seen:
+                    seen.add(key)
+                    selected.append(item)
+        for item in self.top(limit=limit):
+            key = (item["category"], item["key"])
+            if key not in seen:
+                seen.add(key)
+                selected.append(item)
+            if len(selected) >= limit:
+                break
+        return selected
+
+    def format_for_prompt(self, query: str = "", limit: int = 8) -> str:
+        mems = self.select_for_context(query=query, limit=limit)
         if not mems: return ""
         by_cat: dict = {}
         for m in mems:
@@ -345,7 +374,7 @@ TOOL_MAP = {
     "delete_memory": delete_memory,
 }
 
-TOOLS = build_tool_definitions(
+READ_WRITE_TOOLS = build_tool_definitions(
     include_web=True,
     extra_tools=[
         {"type":"function","function":{"name":"save_memory","description":"Guarda un hecho duradero en memoria persistente SQLite entre sesiones. Usa para preferencias, patrones de código, decisiones de arquitectura, bugs conocidos.","parameters":{"type":"object","properties":{"key":{"type":"string","description":"Identificador corto en snake_case"},"value":{"type":"string","description":"Descripción concisa del hecho a recordar"},"category":{"type":"string","enum":["fact","pattern","preference","bug","project"],"description":"Categoría de la memoria"},"importance":{"type":"integer","description":"Importancia 1-10 (10=crítico). Default 5."}},"required":["key","value"]}}},
@@ -409,7 +438,16 @@ def scan_project_ast(work_dir: str, max_files: int = 30) -> str:
 # _render_inline, _TOOL_LABELS, _rel, print_tool_call, print_tool_result
 # are imported from base_agent at the top of this file.
 
-def print_header(model: str, backend: str, work_dir: str, tag: str, ctx: int, temp: float, router: SmartRouter):
+def print_header(
+    model: str,
+    backend: str,
+    work_dir: str,
+    tag: str,
+    ctx: int,
+    temp: float,
+    router: SmartRouter,
+    read_only: bool = False,
+):
     console.print()
     logo = Text.from_markup(f"[{C_LOGO}]╔══════╗\n║HYBRID║\n║  IA  ║\n╚══════╝[/]")
     info = Text()
@@ -419,7 +457,8 @@ def print_header(model: str, backend: str, work_dir: str, tag: str, ctx: int, te
     info.append(f"  ctx:{ctx}  temp:{temp}  {work_dir}\n", style=C_DIM)
     internet = "internet · " if WEB_AVAILABLE else ""
     critic_txt = "actor-crítico · " if tag.endswith("★") else ""
-    info.append(f"  {internet}{critic_txt}tools · streaming · router · self-healing\n", style=C_DIM)
+    read_mode = "solo lectura · " if read_only else ""
+    info.append(f"  {internet}{critic_txt}{read_mode}tools · streaming · router · self-healing\n", style=C_DIM)
     info.append("  /help para comandos  ·  'salir' para terminar", style=C_DIM)
     console.print(Padding(Columns([logo, info], padding=(0, 2)), (1, 2)))
     console.print(Rule(style=C_BORDER)); console.print()
@@ -441,7 +480,7 @@ SLASH_HELP = """[bold]Comandos disponibles:[/]
 
 # ── System Prompt ─────────────────────────────────────────────────────────────
 def build_system_prompt(work_dir: str, project_context: str, memories: str = "") -> str:
-    desktop = str(Path.home() / "Desktop")
+    placeholder_targets = get_workspace_placeholder_targets()
     return render_shared_prompt(
         template_name="hybrid_system_prompt.txt",
         work_dir=work_dir,
@@ -450,7 +489,9 @@ def build_system_prompt(work_dir: str, project_context: str, memories: str = "")
             f"Eres un agente autónomo de programación. Directorio de trabajo: {work_dir}\n"
             "Responde en español y usa herramientas para completar tareas.\n"
         ),
-        desktop=desktop,
+        desktop=placeholder_targets["desktop"],
+        documents=placeholder_targets["documents"],
+        workspace=placeholder_targets["workspace"],
         project_context=project_context,
         memories=memories,
     )
@@ -466,7 +507,9 @@ class Agent:
                  remote_model: str = "",
                  system_prompt_path: Optional[str] = None,
                  sandbox: Optional[str] = None,
-                 sandbox_image: str = "python:3.12-slim"):
+                 sandbox_image: str = "python:3.12-slim",
+                 read_only: bool = False,
+                 guided_mode: bool = False):
         global _mem
         self.model      = model
         self.work_dir   = str(Path(work_dir).resolve())
@@ -479,11 +522,20 @@ class Agent:
         self.remote_url = remote_url
         self.remote_model = remote_model
         self.critic     = critic
+        self.read_only  = read_only
+        self.guided_mode = guided_mode
+        self.max_recovery_attempts = 2
         self.messages: list = []
         self.system_prompt_path = Path(system_prompt_path).resolve() if system_prompt_path else None
 
         # Sync shared tool runtime to this agent's working directory
-        sync_work_dir(self.work_dir)
+        sync_work_dir(self.work_dir, read_only=read_only)
+        self.tools = build_agent_tools(
+            include_web=True,
+            extra_tools=READ_WRITE_TOOLS[len(BASE_TOOLS):],
+            read_only=read_only,
+        )
+        self.last_memory_keys: tuple[str, ...] = ()
 
         self.selected_backend = backend if backend != "auto" else None
 
@@ -695,6 +747,20 @@ class Agent:
             console.print(f"[{C_ERR}]  Comando desconocido: {c}  (usa /help)[/]")
         return None
 
+    def _memory_context_message(self, user_input: str) -> Optional[dict]:
+        memories = self.memdb.select_for_context(user_input, limit=6)
+        if not memories:
+            self.last_memory_keys = ()
+            return None
+        keys = tuple(f"{m['category']}:{m['key']}" for m in memories)
+        if keys == self.last_memory_keys:
+            return None
+        self.last_memory_keys = keys
+        lines = ["[MEMORIA RELEVANTE DEL TURNO]"]
+        for item in memories:
+            lines.append(f"- [{item['category']}] {item['key']}: {item['value']}")
+        return {"role": "system", "content": "\n".join(lines)}
+
     def _stream_response(self, messages: list, backend: str) -> tuple[str, list]:
         """Hace streaming y retorna (content, tool_calls). Parsea <think>/<thought>."""
         client, model = self._client_for(backend)
@@ -828,7 +894,7 @@ class Agent:
             _ollama_opts = {"num_gpu": 99, "num_ctx": self.ctx, "num_predict": -1,
                             "num_batch": 512, "main_gpu": 0} if backend == "local" else {}
             try:
-                kwargs = dict(model=model, messages=messages, tools=TOOLS, stream=True,
+                kwargs = dict(model=model, messages=messages, tools=self.tools, stream=True,
                               temperature=self.temp, max_tokens=self.ctx,
                               **({"extra_body": {"options": _ollama_opts}} if _ollama_opts else {}))
                 _drain(client.chat.completions.create(**kwargs))
@@ -852,10 +918,68 @@ class Agent:
         console.print(f"[{C_DIM}]✳ {elapsed:.1f}s · {self.router.icon(backend)}[/]")
         return "".join(collected), tool_calls_raw
 
-    def _critic_review(self, task_summary: str, changes: list[str]) -> None:
+    def _role_subcall(self, role: str, prompt: str, max_tokens: int = 260, backend: str = "local") -> str:
+        role_prompts = {
+            "planner": (
+                "Eres PLANNER. Devuelve un plan corto y accionable en español: artefactos, tools, validación y riesgo principal."
+            ),
+            "critic": (
+                "Eres CRITIC. Revisa el resultado de forma concisa. Si está bien responde solo '✓ Sin problemas.'."
+            ),
+            "recovery": (
+                "Eres FIXER. Devuelve una única instrucción de reintento concreta y distinta."
+            ),
+        }
+        client = self._client_for(backend)
+        try:
+            resp = client.chat.completions.create(
+                model=self._model_for(backend),
+                messages=[
+                    {"role": "system", "content": role_prompts[role]},
+                    {"role": "user", "content": prompt},
+                ],
+                stream=False,
+                temperature=0.1,
+                max_tokens=max_tokens,
+            )
+            return (resp.choices[0].message.content or "").strip()
+        except Exception as exc:
+            self.logger.warning(
+                "Subcall de rol no disponible",
+                extra={"tool_args": {"role": role}, "error_details": str(exc)},
+            )
+            return ""
+
+    def _plan_task(self, user_input: str, backend: str) -> str:
+        if not self.guided_mode or not should_plan_task(user_input):
+            return ""
+        emit_role_event("planner", user_input)
+        plan = self._role_subcall(
+            "planner",
+            f"Tarea: {user_input}\nWorkspace: {self.work_dir}\nPlanifica para ejecutar de verdad.",
+            max_tokens=220,
+            backend=backend,
+        )
+        if plan:
+            emit_role_result("planner", "ok", plan)
+        else:
+            emit_role_result("planner", "skip", "sin plan adicional")
+        return plan
+
+    def _recovery_retry(self, reason: str, backend: str) -> str:
+        emit_role_event("recovery", reason)
+        retry = self._role_subcall("recovery", reason, max_tokens=140, backend=backend)
+        if retry:
+            emit_role_result("recovery", "ok", retry)
+            return retry
+        emit_role_result("recovery", "skip", "usando instrucción determinista")
+        return reason
+
+    def _critic_review(self, task_summary: str, changes: list[str]) -> str:
         """Actor-Crítico: segunda llamada local para revisar cambios de código."""
-        if not changes: return
-        console.print(f"\n[{C_CRITIC}]  ⚡ Actor-Crítico revisando...[/]")
+        if not changes:
+            return ""
+        emit_role_event("critic", f"{len(changes)} archivos")
         review_prompt = f"""Eres un revisor de código senior. Revisa estos cambios brevemente:
 
 Tarea realizada: {task_summary}
@@ -872,10 +996,14 @@ No repitas lo que se hizo, solo señala problemas si los hay."""
             )
             review = resp.choices[0].message.content or ""
             if review.strip():
+                status = "ok" if "sin problemas" in review.lower() or review.strip().startswith("✓") else "fail"
+                emit_role_result("critic", status, review)
                 console.print(f"[{C_CRITIC}]  ★ Crítico:[/] ", end="")
                 console.print(_render_inline(review.strip()))
+                return review.strip()
         except Exception as e:
             console.print(f"[{C_DIM}]  (Crítico no disponible: {e})[/]")
+        return ""
 
     def _validate_tool_args(self, fn_name: str, args: dict) -> dict:
         fn = TOOL_MAP[fn_name]
@@ -909,7 +1037,7 @@ No repitas lo que se hizo, solo señala problemas si los hay."""
             f"[{m['role'].upper()}]: {str(m.get('content',''))[:400]}"
             for m in self.messages[1:] if m.get("content")
         )[-7000:]
-        dream_tools = [t for t in TOOLS if t["function"]["name"] == "save_memory"]
+        dream_tools = [t for t in self.tools if t["function"]["name"] == "save_memory"]
         prompt = (f"Analiza esta sesión y extrae hasta 6 hechos valiosos para futuras sesiones.\n"
                   f"Llama save_memory(key, value, category) por cada uno.\n"
                   f"Categorías válidas: fact (info del proyecto), pattern (cómo trabaja el usuario), "
@@ -976,14 +1104,16 @@ No repitas lo que se hizo, solo señala problemas si los hay."""
     def run(self):
         def _make_system_prompt() -> str:
             project_context = load_project_context(self.work_dir)
-            memories_text = self.memdb.format_for_prompt()
+            memories_text = self.memdb.format_for_prompt(limit=6)
             return render_shared_prompt(
                 template_name="hybrid_system_prompt.txt",
                 work_dir=self.work_dir,
                 logger=self.logger,
                 fallback_builder=lambda: build_system_prompt(self.work_dir, project_context, memories_text),
                 system_prompt_path=self.system_prompt_path,
-                desktop=str(Path.home() / "Desktop"),
+                desktop=get_workspace_placeholder_targets()["desktop"],
+                documents=get_workspace_placeholder_targets()["documents"],
+                workspace=get_workspace_placeholder_targets()["workspace"],
                 project_context=project_context,
                 memories=memories_text,
             )
@@ -993,12 +1123,21 @@ No repitas lo que se hizo, solo señala problemas si los hay."""
 
         self.logger.info("Sesión iniciada", extra={"tool_args": {
             "model": self.model, "backend": self.router.force or "auto",
-            "work_dir": self.work_dir, "critic": self.critic,
+            "work_dir": self.work_dir, "critic": self.critic, "guided_mode": self.guided_mode,
         }})
 
         # Detectar backend inicial para el header
         initial_backend, _ = self.router.route("hola", 0)
-        print_header(self._model_for(initial_backend), initial_backend, self.work_dir, self.tag, self.ctx, self.temp, self.router)
+        print_header(
+            self._model_for(initial_backend),
+            initial_backend,
+            self.work_dir,
+            self.tag,
+            self.ctx,
+            self.temp,
+            self.router,
+            self.read_only,
+        )
 
         while True:
             user_input = self._get_input()
@@ -1045,16 +1184,30 @@ No repitas lo que se hizo, solo señala problemas si los hay."""
             changed_files: list[str] = []  # para actor-crítico
             last_task = user_input
             self._compact_if_needed()
+            plan = self._plan_task(user_input, backend)
+            guidance_messages = []
+            if plan:
+                guidance_messages.append({"role": "system", "content": f"[PLAN INTERNO]\n{plan}"})
 
             # File-creation post-condition tracking
             _file_intent   = detect_file_creation_intent(user_input)
             candidates     = extract_candidate_paths(user_input)
-            _expected_path = resolve_in_workspace(candidates[0]).resolve() if candidates else None
+            expected_paths = candidates[:1]
             _file_created  = False
             _recovery_done = False
+            recovery_count = 0
+            critic_fix_used = False
+            test_results: list[dict] = []
+            before_snapshots = snapshot_workspace_files(expected_paths)
 
             while True:
                 trimmed = self.messages[-80:]  # mantener últimos 80 mensajes
+                memory_context = self._memory_context_message(user_input)
+                if memory_context:
+                    trimmed = [*trimmed, memory_context]
+                if guidance_messages:
+                    trimmed = [*trimmed, *guidance_messages]
+                emit_role_event("executor", user_input if recovery_count == 0 else f"retry {recovery_count}: {user_input}")
                 full_content, tool_calls = self._stream_response(trimmed, backend)
 
                 if full_content:
@@ -1083,6 +1236,13 @@ No repitas lo que se hizo, solo señala problemas si los hay."""
                                     extra={"tool_name": fn_name, "error_details": result["error"]}
                                 )
                             else:
+                                tracked_paths: list[str] = []
+                                if fn_name in {"write_file", "edit_file", "read_file", "delete_file", "create_directory", "change_directory"}:
+                                    if fn_args.get("path"):
+                                        tracked_paths.append(str(fn_args["path"]))
+                                if fn_name == "move_file":
+                                    tracked_paths.extend([str(fn_args.get("src", "")), str(fn_args.get("dst", ""))])
+                                before_snapshots.update(snapshot_workspace_files(tracked_paths))
                                 print_tool_call(fn_name, fn_args)
                                 result = self._invoke_tool(fn_name, fn_args)
                                 print_tool_result(result)
@@ -1090,16 +1250,29 @@ No repitas lo que se hizo, solo señala problemas si los hay."""
                                 # Registrar archivos modificados para crítico
                                 if fn_name in ("edit_file", "write_file") and "error" not in result:
                                     if p := result.get("path"): changed_files.append(p)
+                                elif fn_name == "move_file" and "error" not in result:
+                                    if p := result.get("to"): changed_files.append(p)
 
                                 # Track successful file creation
                                 if fn_name == "write_file" and "error" not in result:
-                                    target = fn_args.get("path") or result.get("path")
+                                    target = result.get("path") or fn_args.get("path")
                                     if target:
-                                        target_path = resolve_in_workspace(str(target))
-                                        if _expected_path is None or target_path == _expected_path:
+                                        try:
+                                            target_path = resolve_in_workspace(str(target)).resolve()
+                                        except ValueError:
+                                            target_path = None
+                                        expected_resolved = None
+                                        if expected_paths:
+                                            try:
+                                                expected_resolved = resolve_in_workspace(expected_paths[0]).resolve()
+                                            except ValueError:
+                                                expected_resolved = None
+                                        if target_path is not None and (expected_resolved is None or target_path == expected_resolved):
                                             _file_created = True
-                                    else:
-                                        _file_created = True
+                                if fn_name == "run_command":
+                                    command_text = str(fn_args.get("command", ""))
+                                    if requested_test_validation(user_input) or re.search(r"\b(test|pytest|unittest|cargo test)\b", command_text, re.I):
+                                        test_results.append(result)
 
                                 # ── Self-healing ──────────────────────────────────────────
                                 # Covers run_command failures and edit_file "not found" errors.
@@ -1154,15 +1327,8 @@ No repitas lo que se hizo, solo señala problemas si los hay."""
                     # the model just returned plain text, give it one explicit nudge.
                     if _file_intent and not _file_created and not _recovery_done:
                         _recovery_done = True
-                        target_hint = ""
-                        if _expected_path is not None:
-                            rel = _expected_path.relative_to(Path(self.work_dir))
-                            target_hint = f" Ruta esperada: {rel}"
-                        recovery = (
-                            "No creaste el archivo — respondiste con texto. "
-                            "Usa write_file() ahora para crear el archivo en la ruta que indicó el usuario. "
-                            "Si el directorio no existe dentro del workspace, usa create_directory() primero."
-                            f"{target_hint}"
+                        recovery = build_recovery_instruction(
+                            "El usuario pidió crear un archivo y todavía no existe en disco."
                         )
                         self.messages.append({"role": "user", "content": recovery})
                         console.print(f"[{C_DIM}]  ↺ El modelo no usó write_file() — reintentando...[/]")
@@ -1172,10 +1338,48 @@ No repitas lo que se hizo, solo señala problemas si los hay."""
                         )
                         continue
 
+                    emit_role_result("executor", "ok", f"{len(changed_files)} cambios rastreados")
+                    if self.guided_mode and should_verify_task(user_input, changed_files):
+                        emit_role_event("verifier", user_input)
+                        report = verify_workspace_changes(
+                            expected_paths=expected_paths,
+                            changed_paths=changed_files,
+                            before_snapshots=before_snapshots,
+                            test_results=test_results,
+                            require_tests=requested_test_validation(user_input),
+                        )
+                        emit_role_result(
+                            "verifier",
+                            "ok" if report.ok else "fail",
+                            report.summary if report.ok else "; ".join(report.errors[:3]) or report.summary,
+                        )
+                        if not report.ok and recovery_count < self.max_recovery_attempts:
+                            recovery_count += 1
+                            retry_instruction = self._recovery_retry(
+                                build_recovery_instruction("La verificación falló.", report),
+                                backend,
+                            )
+                            self.messages.append({"role": "user", "content": retry_instruction})
+                            continue
+
                     # Actor-Crítico: revisar si hubo cambios de código
                     if self.critic and changed_files:
-                        self._critic_review(last_task, list(set(changed_files)))
+                        review = self._critic_review(last_task, list(set(changed_files)))
                         changed_files.clear()
+                        if (
+                            self.guided_mode
+                            and review
+                            and not critic_fix_used
+                            and "sin problemas" not in review.lower()
+                            and not review.strip().startswith("✓")
+                        ):
+                            critic_fix_used = True
+                            retry_instruction = self._recovery_retry(
+                                f"Corrige estos hallazgos del crítico y vuelve a verificar: {summarize_text(review, 220)}",
+                                backend,
+                            )
+                            self.messages.append({"role": "user", "content": retry_instruction})
+                            continue
 
                     heal_count = 0
                     break
@@ -1253,6 +1457,8 @@ if __name__ == "__main__":
                         help="Modo de sandbox para run_command: 'docker' usa un contenedor efímero")
     parser.add_argument("--sandbox-image", default="python:3.12-slim",
                         help="Imagen Docker para el sandbox (default: python:3.12-slim)")
+    parser.add_argument("--read-only", action="store_true", help="Bloquea tools mutantes y shell de escritura")
+    parser.add_argument("--guided-mode", action="store_true", help="Activa planner/verifier/critic/recovery ligeros")
     args = parser.parse_args()
 
     model = args.model if args.model else select_model_menu(args.local_url)
@@ -1275,5 +1481,7 @@ if __name__ == "__main__":
         system_prompt_path=args.system_prompt,
         sandbox=args.sandbox,
         sandbox_image=args.sandbox_image,
+        read_only=args.read_only,
+        guided_mode=args.guided_mode,
     ).run()
 

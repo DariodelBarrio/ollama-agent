@@ -4,6 +4,7 @@ mod agent;
 mod app;
 mod config;
 mod models;
+mod preflight;
 mod ui;
 
 use std::{io, path::PathBuf};
@@ -13,17 +14,23 @@ use ratatui::{
     backend::CrosstermBackend,
     crossterm::{
         cursor,
-        event::{self, Event, KeyEventKind},
+        event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind},
         execute,
         terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     },
+    layout::Rect,
     Terminal,
 };
 
 fn main() {
     if let Err(err) = run() {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, cursor::Show);
+        let _ = execute!(
+            io::stdout(),
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            cursor::Show
+        );
         eprintln!("Error: {err}");
         std::process::exit(1);
     }
@@ -38,13 +45,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     std::panic::set_hook(Box::new(|info| {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, cursor::Show);
+        let _ = execute!(
+            io::stdout(),
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            cursor::Show
+        );
         eprintln!("\nPanic: {info}");
     }));
 
     let backend = CrosstermBackend::new(io::stdout());
     let mut term = Terminal::new(backend)?;
     let mut app = App::new(repo_root);
+    let mut mouse_capture_enabled = false;
     // Draw only when state changed. The app already polls background tasks
     // continuously, so unconditional redraws would just re-render the same
     // frame and make navigation feel heavier on Windows terminals.
@@ -63,12 +76,30 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             dirty = false;
         }
 
+        let wants_mouse_capture = app.wants_mouse_capture();
+        if wants_mouse_capture != mouse_capture_enabled {
+            if wants_mouse_capture {
+                execute!(term.backend_mut(), EnableMouseCapture)?;
+            } else {
+                execute!(term.backend_mut(), DisableMouseCapture)?;
+            }
+            mouse_capture_enabled = wants_mouse_capture;
+        }
+
         if event::poll(app.poll_timeout())? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    app.handle_key(key.code, key.modifiers);
+            match event::read()? {
+                Event::Key(key) => {
+                    if key.kind == KeyEventKind::Press {
+                        app.handle_key(key.code, key.modifiers);
+                        dirty = true;
+                    }
+                }
+                Event::Mouse(mouse) => {
+                    let size = term.size()?;
+                    app.handle_mouse(mouse, Rect::new(0, 0, size.width, size.height));
                     dirty = true;
                 }
+                _ => {}
             }
         }
 
@@ -77,7 +108,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    execute!(term.backend_mut(), LeaveAlternateScreen, cursor::Show)?;
+    execute!(
+        term.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        cursor::Show
+    )?;
     disable_raw_mode()?;
     Ok(())
 }

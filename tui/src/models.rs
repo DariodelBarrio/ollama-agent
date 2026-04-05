@@ -37,7 +37,9 @@ impl ModelTask {
         let base = native_api_base(profile.local_management_base())?;
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
-            let _ = tx.send(ModelEvent::Status(format!("Consultando modelos en {base}...")));
+            let _ = tx.send(ModelEvent::Status(format!(
+                "Consultando modelos en {base}..."
+            )));
             let result = list_models(&base);
             let _ = tx.send(ModelEvent::Listed(result));
         });
@@ -189,7 +191,11 @@ fn render_pull_status(update: &PullLine) -> Option<(String, bool)> {
                 status = "descargando".into();
             }
             return Some((
-                format!("{status} {pct:.0}% ({}/{})", human_bytes(completed), human_bytes(total)),
+                format!(
+                    "{status} {pct:.0}% ({}/{})",
+                    human_bytes(completed),
+                    human_bytes(total)
+                ),
                 true,
             ));
         }
