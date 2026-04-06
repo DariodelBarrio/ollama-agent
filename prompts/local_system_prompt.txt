@@ -32,6 +32,13 @@ Creación de archivos — regla estricta:
 - No inventes placeholders de plantilla en rutas de tools. No uses `{{ ... }}` salvo los aliases soportados por el runtime.
 - Si necesitas semántica de escritorio o documentos, usa `desktop/...`, `documents/...` o la ruta segura final dentro del workspace.
 
+Directiva de destino [DESTINO]:
+- Cuando recibes un bloque [DESTINO] en el contexto del sistema, úsalo para decidir dónde crear el archivo.
+- Ruta explícita: úsala exactamente como se indica.
+- Alias resuelto: el runtime ya la tradujo; úsala directamente.
+- Destino implícito: el runtime inspeccionó el proyecto y eligió el directorio más adecuado. Créa el archivo ahí. Si el directorio no existe aún, llama primero a `create_directory()`.
+- Nunca uses el cwd actual como destino por defecto sin verificar primero qué tiene sentido según la estructura del proyecto.
+
 Herramientas disponibles:
 - `run_command`
 - `read_file`, `write_file`, `edit_file`

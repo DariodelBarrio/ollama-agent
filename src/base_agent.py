@@ -344,6 +344,190 @@ def extract_candidate_paths(user_input: str) -> list[str]:
     return [m.group(0) for m in _INTENT_PATH_RE.finditer(text)]
 
 
+# ── Destination intent classification ────────────────────────────────────────
+
+_KNOWN_ALIASES: frozenset[str] = frozenset({
+    "desktop", "documents", "escritorio", "documentos", "workspace",
+})
+
+# Matches alias words used as location markers (with or without preposition)
+_ALIAS_DEST_RE = re.compile(
+    r'\b(desktop|escritorio|documentos|documents|workspace)\b',
+    re.IGNORECASE,
+)
+
+# Strict path pattern — no whitespace allowed, optional directory prefix.
+# Used in classify_destination_intent to avoid matching "hazme desktop/f.py"
+# as a single path token (unlike _INTENT_PATH_RE which allows spaces).
+_STRICT_FILE_PATH_RE = re.compile(
+    r'((?:[^\s/\\]+[/\\])*[^\s/\\]+'
+    r'\.(py|js|ts|jsx|tsx|rb|go|java|c|cpp|h|hpp|rs|sh|bash|'
+    r'md|txt|json|yaml|yml|toml|html|css|sql|env|cfg|ini|conf))',
+    re.IGNORECASE,
+)
+
+# Artifact type detection patterns (checked in order; first match wins)
+_ARTIFACT_TYPE_PATTERNS: list[tuple[str, re.Pattern]] = [
+    ("test",      re.compile(r'\b(test|tests|prueba|pruebas|unittest|pytest|spec|specs|testing)\b', re.IGNORECASE)),
+    ("doc",       re.compile(r'\b(doc|docs|documentaci[oó]n|documentation|readme|manual|gu[ií]a)\b', re.IGNORECASE)),
+    ("config",    re.compile(r'\b(config|configuraci[oó]n|settings|conf|ini|env|\.env)\b', re.IGNORECASE)),
+    ("module",    re.compile(r'\b(m[oó]dulo|module|clase|class|paquete|package|librer[ií]a|library|lib)\b', re.IGNORECASE)),
+    ("script",    re.compile(r'\b(script|scripts|ejecutable|util|utility|herramienta|tool|helper|limpia|clean)\b', re.IGNORECASE)),
+]
+
+# Directories associated with each artifact type (preference order)
+_ARTIFACT_DIR_CANDIDATES: dict[str, list[str]] = {
+    "test":   ["tests", "test", "spec", "specs", "__tests__"],
+    "doc":    ["docs", "doc", "documentation", "wiki"],
+    "config": ["config", "configs", "cfg", "settings", "conf"],
+    "script": ["scripts", "script", "tools", "tool", "bin", "utils", "util", "helpers"],
+    "module": ["src", "lib", "source", "app", "pkg"],
+}
+
+# Default convention directory when nothing exists yet
+_ARTIFACT_CONVENTION: dict[str, str] = {
+    "test":   "tests",
+    "doc":    "docs",
+    "config": "config",
+    "script": "scripts",
+    "module": "src",
+}
+
+
+def infer_artifact_type(user_input: str) -> str:
+    """Infer what kind of artifact the user wants to create.
+
+    Returns one of: "test", "doc", "config", "module", "script".
+    Defaults to "script" when no pattern matches.
+    """
+    text = (user_input or "").strip()
+    for artifact_type, pattern in _ARTIFACT_TYPE_PATTERNS:
+        if pattern.search(text):
+            return artifact_type
+    return "script"
+
+
+def classify_destination_intent(user_input: str) -> tuple[str, str]:
+    """Classify where the user wants to create a file.
+
+    Returns one of:
+    - ``("explicit", path)`` — user specified a real path like ``scripts/foo.py``
+    - ``("alias", alias)``  — user mentioned a semantic alias like ``desktop``
+    - ``("implicit", artifact_type)`` — no location given; must explore the project
+
+    The classification drives how the agent resolves the destination directory:
+    explicit paths are used as-is; aliases are resolved by ``normalize_workspace_path``;
+    implicit destinations trigger project-structure inspection via
+    ``select_target_directory``.
+    """
+    text = (user_input or "").strip()
+
+    # Use the strict (no-space) path regex so that "hazme desktop/f.py" is not
+    # captured as a single path token — only contiguous path-like strings match.
+    for m in _STRICT_FILE_PATH_RE.finditer(text):
+        c = m.group(1)
+        p = Path(c.replace("\\", "/"))
+        parts = p.parts
+        first = parts[0].lower() if parts else ""
+
+        if len(parts) >= 2:
+            if first in _KNOWN_ALIASES:
+                # e.g. "desktop/script.py" → alias destination
+                return "alias", first
+            # e.g. "scripts/foo.py" → explicit path with directory
+            return "explicit", c
+
+        # Single token with extension and not a bare alias → explicit filename
+        if p.suffix and first not in _KNOWN_ALIASES:
+            return "explicit", c
+
+    # No path extracted from text — check for bare alias mention
+    alias_match = _ALIAS_DEST_RE.search(text)
+    if alias_match:
+        return "alias", alias_match.group(1).lower()
+
+    # No location information at all → implicit, classify by artifact type
+    return "implicit", infer_artifact_type(text)
+
+
+def inspect_project_layout(root_dir: str) -> dict[str, list[str]]:
+    """Inspect the first level of ``root_dir`` and return relevant directories.
+
+    Returns a dict mapping purpose labels to lists of absolute paths::
+
+        {
+            "scripts": ["/project/scripts"],
+            "tests":   ["/project/tests"],
+            ...
+        }
+
+    Only top-level directories are considered; hidden dirs (starting with ``.'')
+    and ``__pycache__`` are excluded.
+    """
+    root = Path(root_dir).resolve()
+    try:
+        top_dirs = {
+            d.name.lower(): d
+            for d in root.iterdir()
+            if d.is_dir() and not d.name.startswith(".") and d.name != "__pycache__"
+        }
+    except Exception:
+        return {}
+
+    purpose_groups: dict[str, list[str]] = {}
+    for purpose, candidates in _ARTIFACT_DIR_CANDIDATES.items():
+        found = [str(root / name) for name in candidates if name in top_dirs]
+        if found:
+            purpose_groups[purpose] = found
+
+    return purpose_groups
+
+
+def select_target_directory(artifact_type: str, root_dir: str) -> tuple[str, str]:
+    """Choose the best destination directory for a given artifact type.
+
+    Strategy (in order):
+    1. Inspect ``root_dir`` for existing directories that match the artifact type.
+    2. If found, use the first match.
+    3. If not found, return the conventional directory name under ``root_dir``
+       (e.g. ``tests/`` for a test, ``scripts/`` for a utility script).
+
+    The returned path is always inside ``root_dir`` — never based on cwd.
+
+    Returns:
+        ``(selected_dir_path, reasoning)`` where ``reasoning`` is a short
+        human-readable explanation of why that directory was chosen.
+    """
+    root = Path(root_dir).resolve()
+    layout = inspect_project_layout(root_dir)
+
+    # Find the first existing directory that matches this artifact type
+    for purpose_key in _ARTIFACT_DIR_CANDIDATES.get(artifact_type, []):
+        if "scripts" in layout and artifact_type == "script":
+            # Prefer the first scripts-purpose dir
+            break
+        existing = layout.get(artifact_type, [])
+        if existing:
+            selected = existing[0]
+            dir_name = Path(selected).name
+            return selected, f"carpeta '{dir_name}/' existente detectada en el proyecto"
+
+    # Check layout directly by artifact type key
+    existing = layout.get(artifact_type, [])
+    if existing:
+        selected = existing[0]
+        dir_name = Path(selected).name
+        return selected, f"carpeta '{dir_name}/' existente detectada en el proyecto"
+
+    # No matching directory — return conventional name (may not exist yet)
+    convention_name = _ARTIFACT_CONVENTION.get(artifact_type, "scripts")
+    target = root / convention_name
+    return (
+        str(target),
+        f"convencion '{convention_name}/' (no existe aún; créala con create_directory si es necesario)",
+    )
+
+
 _PLANNER_COMPLEXITY_RE = re.compile(
     r"\b("
     r"refactor|refactoriza|restructure|reorganiza|migrate|migra|rename|renombra|"

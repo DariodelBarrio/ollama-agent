@@ -742,6 +742,233 @@ class VerificationHelperTests(unittest.TestCase):
         self.assertIn("missing.py", message)
 
 
+# ── classify_destination_intent ───────────────────────────────────────────────
+class DestinationIntentClassificationTests(unittest.TestCase):
+    """Tests for the three-way destination classification."""
+
+    def test_explicit_path_with_directory(self):
+        kind, val = base_agent.classify_destination_intent("crea un script en scripts/test.py")
+        self.assertEqual(kind, "explicit")
+        self.assertIn("scripts", val)
+        self.assertIn("test.py", val)
+
+    def test_explicit_path_src_subdir(self):
+        kind, val = base_agent.classify_destination_intent("escribe el módulo en src/utils.py")
+        self.assertEqual(kind, "explicit")
+        self.assertIn("src", val)
+
+    def test_explicit_single_filename(self):
+        kind, val = base_agent.classify_destination_intent("crea cleanup.py aquí")
+        self.assertEqual(kind, "explicit")
+        self.assertIn("cleanup.py", val)
+
+    def test_alias_escritorio(self):
+        kind, val = base_agent.classify_destination_intent("crea un script en el escritorio")
+        self.assertEqual(kind, "alias")
+        self.assertEqual(val.lower(), "escritorio")
+
+    def test_alias_desktop(self):
+        kind, val = base_agent.classify_destination_intent("save it to desktop please")
+        self.assertEqual(kind, "alias")
+        self.assertEqual(val.lower(), "desktop")
+
+    def test_alias_documentos(self):
+        kind, val = base_agent.classify_destination_intent("guárdalo en documentos")
+        self.assertEqual(kind, "alias")
+        self.assertIn("document", val.lower())
+
+    def test_alias_in_path(self):
+        # "desktop/script.py" → alias, not explicit
+        kind, val = base_agent.classify_destination_intent("hazme desktop/script.py")
+        self.assertEqual(kind, "alias")
+
+    def test_implicit_script(self):
+        kind, val = base_agent.classify_destination_intent("hazme un script para limpiar logs")
+        self.assertEqual(kind, "implicit")
+        self.assertEqual(val, "script")
+
+    def test_implicit_test(self):
+        kind, val = base_agent.classify_destination_intent("crea un test para la función principal")
+        self.assertEqual(kind, "implicit")
+        self.assertEqual(val, "test")
+
+    def test_implicit_doc(self):
+        kind, val = base_agent.classify_destination_intent("crea documentación para este módulo")
+        self.assertEqual(kind, "implicit")
+        self.assertEqual(val, "doc")
+
+    def test_implicit_correct_folder(self):
+        kind, val = base_agent.classify_destination_intent(
+            "ponlo en la carpeta correcta"
+        )
+        self.assertEqual(kind, "implicit")
+
+    def test_implicit_module(self):
+        kind, val = base_agent.classify_destination_intent("crea un módulo nuevo para auth")
+        self.assertEqual(kind, "implicit")
+        self.assertEqual(val, "module")
+
+
+# ── infer_artifact_type ───────────────────────────────────────────────────────
+class InferArtifactTypeTests(unittest.TestCase):
+    def test_test_artifact(self):
+        self.assertEqual(base_agent.infer_artifact_type("crea un test unitario"), "test")
+
+    def test_doc_artifact(self):
+        self.assertEqual(base_agent.infer_artifact_type("escribe la documentación de la API"), "doc")
+
+    def test_config_artifact(self):
+        self.assertEqual(base_agent.infer_artifact_type("genera el config.json del proyecto"), "config")
+
+    def test_module_artifact(self):
+        self.assertEqual(base_agent.infer_artifact_type("crea un módulo de autenticación"), "module")
+
+    def test_script_artifact(self):
+        self.assertEqual(base_agent.infer_artifact_type("hazme un script para limpiar logs"), "script")
+
+    def test_default_is_script(self):
+        self.assertEqual(base_agent.infer_artifact_type("hazme algo útil"), "script")
+
+
+# ── inspect_project_layout & select_target_directory ─────────────────────────
+class SmartDirectorySelectionTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp_root = ROOT / ".tmp-tests"
+        self._tmp_root.mkdir(exist_ok=True)
+        self._tmp = self._tmp_root / f"smart-dir-{uuid.uuid4().hex}"
+        self._tmp.mkdir()
+        base_agent.sync_work_dir(str(self._tmp))
+
+    def tearDown(self):
+        base_agent.sync_work_dir(str(ROOT))
+        shutil.rmtree(self._tmp_root, ignore_errors=True)
+
+    def _mkdir(self, *parts):
+        d = self._tmp.joinpath(*parts)
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    # ── inspect_project_layout ────────────────────────────────────────────
+
+    def test_layout_finds_scripts_dir(self):
+        self._mkdir("scripts")
+        layout = base_agent.inspect_project_layout(str(self._tmp))
+        # Purpose key is "script" (matches artifact type names)
+        self.assertIn("script", layout)
+        self.assertTrue(any("scripts" in p for p in layout["script"]))
+
+    def test_layout_finds_tests_dir(self):
+        self._mkdir("tests")
+        layout = base_agent.inspect_project_layout(str(self._tmp))
+        # Purpose key is "test" (matches artifact type names)
+        self.assertIn("test", layout)
+
+    def test_layout_finds_docs_dir(self):
+        self._mkdir("docs")
+        layout = base_agent.inspect_project_layout(str(self._tmp))
+        self.assertIn("doc", layout)
+
+    def test_layout_empty_for_fresh_dir(self):
+        # A directory with no known subdirs should return empty layout
+        layout = base_agent.inspect_project_layout(str(self._tmp))
+        self.assertEqual(layout, {})
+
+    def test_layout_ignores_hidden_dirs(self):
+        self._mkdir(".hidden")
+        layout = base_agent.inspect_project_layout(str(self._tmp))
+        for dirs in layout.values():
+            for d in dirs:
+                self.assertNotIn(".hidden", d)
+
+    # ── select_target_directory ───────────────────────────────────────────
+
+    def test_selects_existing_scripts_dir_for_script(self):
+        self._mkdir("scripts")
+        target_dir, reasoning = base_agent.select_target_directory("script", str(self._tmp))
+        self.assertIn("scripts", target_dir)
+        self.assertTrue(target_dir.startswith(str(self._tmp)))
+        self.assertIn("existente", reasoning)
+
+    def test_selects_existing_tests_dir_for_test(self):
+        self._mkdir("tests")
+        target_dir, reasoning = base_agent.select_target_directory("test", str(self._tmp))
+        self.assertIn("tests", target_dir)
+        self.assertIn("existente", reasoning)
+
+    def test_selects_existing_docs_dir_for_doc(self):
+        self._mkdir("docs")
+        target_dir, reasoning = base_agent.select_target_directory("doc", str(self._tmp))
+        self.assertIn("docs", target_dir)
+        self.assertIn("existente", reasoning)
+
+    def test_fallback_convention_when_no_scripts_dir(self):
+        # No scripts/ dir — should return convention path with reasoning
+        target_dir, reasoning = base_agent.select_target_directory("script", str(self._tmp))
+        self.assertIn("scripts", target_dir)
+        self.assertIn("convenci", reasoning)
+
+    def test_fallback_convention_when_no_tests_dir(self):
+        target_dir, reasoning = base_agent.select_target_directory("test", str(self._tmp))
+        self.assertIn("tests", target_dir)
+        self.assertIn("convenci", reasoning)
+
+    def test_result_always_inside_root(self):
+        # Even if cwd is changed, result must be under root_dir
+        import os
+        self._mkdir("scripts")
+        # Simulate cwd being inside a subdirectory
+        original_cwd = os.getcwd()
+        subdir = self._mkdir("subdir")
+        os.chdir(str(subdir))
+        try:
+            target_dir, _ = base_agent.select_target_directory("script", str(self._tmp))
+            self.assertTrue(
+                target_dir.startswith(str(self._tmp)),
+                msg=f"Expected path inside {self._tmp}, got {target_dir}",
+            )
+        finally:
+            os.chdir(original_cwd)
+
+    def test_never_returns_random_cwd_path(self):
+        # No scripts/ dir; cwd inside subdir; result must still be under project root
+        import os
+        subdir = self._mkdir("deep/nested")
+        original_cwd = os.getcwd()
+        os.chdir(str(subdir))
+        try:
+            target_dir, _ = base_agent.select_target_directory("script", str(self._tmp))
+            # Must be anchored to the project root, not to cwd
+            self.assertFalse(
+                target_dir.startswith(str(subdir)),
+                msg="select_target_directory must not return a path relative to cwd",
+            )
+            self.assertTrue(target_dir.startswith(str(self._tmp)))
+        finally:
+            os.chdir(original_cwd)
+
+    def test_prefers_tools_dir_over_root_for_script(self):
+        self._mkdir("tools")
+        target_dir, _ = base_agent.select_target_directory("script", str(self._tmp))
+        # tools/ is a valid scripts-like directory
+        self.assertTrue(target_dir.startswith(str(self._tmp)))
+
+    def test_path_safety_boundary_respected(self):
+        # select_target_directory should never return a path outside root_dir
+        target_dir, _ = base_agent.select_target_directory("script", str(self._tmp))
+        self.assertTrue(
+            Path(target_dir).resolve().parts[:len(self._tmp.resolve().parts)]
+            == self._tmp.resolve().parts,
+        )
+
+    # ── Local and Hybrid use same functions ───────────────────────────────
+
+    def test_both_agents_import_classify_destination_intent(self):
+        # base_agent is the shared module; both agents import from it
+        self.assertTrue(callable(base_agent.classify_destination_intent))
+
+    def test_both_agents_import_select_target_directory(self):
+        self.assertTrue(callable(base_agent.select_target_directory))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -38,7 +38,10 @@ from base_agent import (
     extract_tool_calls_from_text,
     detect_file_creation_intent,
     extract_candidate_paths,
+    classify_destination_intent,
+    select_target_directory,
     get_workspace_placeholder_targets,
+    normalize_path_in_workspace,
     resolve_in_workspace,
     should_plan_task,
     should_verify_task,
@@ -1198,6 +1201,35 @@ No repitas lo que se hizo, solo señala problemas si los hay."""
             recovery_count = 0
             critic_fix_used = False
             test_results: list[dict] = []
+
+            # ── Destination directive ─────────────────────────────────────────
+            if _file_intent:
+                intent_kind, intent_value = classify_destination_intent(user_input)
+                if intent_kind == "explicit":
+                    destination_msg = f"Ruta exacta solicitada: {intent_value}"
+                elif intent_kind == "alias":
+                    resolved_alias = normalize_path_in_workspace(intent_value)
+                    destination_msg = (
+                        f"El usuario indicó destino alias '{intent_value}'. "
+                        f"Ruta resuelta dentro del workspace: {resolved_alias}"
+                    )
+                else:  # implicit
+                    target_dir, reasoning = select_target_directory(intent_value, self.work_dir)
+                    destination_msg = (
+                        f"No se especificó ruta de destino. "
+                        f"Directorio seleccionado por inspección del proyecto: {target_dir} "
+                        f"({reasoning}). "
+                        f"Crea el archivo ahí salvo que haya un motivo más específico."
+                    )
+                    self.logger.debug(
+                        "Destino implícito inferido",
+                        extra={"tool_args": {"artifact": intent_value, "dir": target_dir, "reason": reasoning}},
+                    )
+                guidance_messages.append({
+                    "role": "system",
+                    "content": f"[DESTINO]\n{destination_msg}",
+                })
+
             before_snapshots = snapshot_workspace_files(expected_paths)
 
             while True:
