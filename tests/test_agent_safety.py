@@ -970,5 +970,247 @@ class SmartDirectorySelectionTests(unittest.TestCase):
         self.assertTrue(callable(base_agent.select_target_directory))
 
 
+# ── DestinationTarget construction ────────────────────────────────────────────
+class DestinationTargetBuildTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp_root = ROOT / ".tmp-tests"
+        self._tmp_root.mkdir(exist_ok=True)
+        self._tmp = self._tmp_root / f"dest-build-{uuid.uuid4().hex}"
+        self._tmp.mkdir()
+        base_agent.sync_work_dir(str(self._tmp))
+
+    def tearDown(self):
+        base_agent.sync_work_dir(str(ROOT))
+        shutil.rmtree(self._tmp_root, ignore_errors=True)
+
+    def test_returns_none_for_no_intent(self):
+        result = base_agent.build_destination_target("hola cómo estás", str(self._tmp))
+        self.assertIsNone(result)
+
+    def test_explicit_sets_expected_path(self):
+        dt = base_agent.build_destination_target(
+            "crea un script en scripts/foo.py", str(self._tmp)
+        )
+        self.assertIsNotNone(dt)
+        self.assertEqual(dt.kind, "explicit")
+        self.assertIsNotNone(dt.expected_path)
+        self.assertIn("foo.py", str(dt.expected_path))
+        self.assertIsNotNone(dt.expected_directory)
+
+    def test_explicit_expected_path_inside_root(self):
+        dt = base_agent.build_destination_target(
+            "crea src/utils.py", str(self._tmp)
+        )
+        self.assertIsNotNone(dt)
+        self.assertTrue(str(dt.expected_path).startswith(str(self._tmp)))
+
+    def test_alias_sets_expected_directory(self):
+        dt = base_agent.build_destination_target(
+            "crea un script en el escritorio", str(self._tmp)
+        )
+        self.assertIsNotNone(dt)
+        self.assertEqual(dt.kind, "alias")
+        self.assertIsNone(dt.expected_path)   # filename unknown
+        self.assertIsNotNone(dt.expected_directory)
+        self.assertIn("desktop", str(dt.expected_directory).lower())
+
+    def test_implicit_sets_expected_directory(self):
+        dt = base_agent.build_destination_target(
+            "hazme un script para limpiar logs", str(self._tmp)
+        )
+        self.assertIsNotNone(dt)
+        self.assertEqual(dt.kind, "implicit")
+        self.assertIsNone(dt.expected_path)
+        self.assertIsNotNone(dt.expected_directory)
+        # directory always inside root
+        self.assertTrue(str(dt.expected_directory).startswith(str(self._tmp)))
+
+    def test_implicit_test_targets_tests_dir(self):
+        (self._tmp / "tests").mkdir()
+        dt = base_agent.build_destination_target(
+            "crea un test para la función main", str(self._tmp)
+        )
+        self.assertIsNotNone(dt)
+        self.assertEqual(dt.artifact_type, "test")
+        self.assertIn("tests", str(dt.expected_directory))
+
+    def test_to_guidance_message_explicit(self):
+        dt = base_agent.build_destination_target(
+            "crea scripts/helper.py", str(self._tmp)
+        )
+        msg = dt.to_guidance_message()
+        self.assertIn("Ruta exacta", msg)
+        self.assertIn("helper.py", msg)
+
+    def test_to_guidance_message_implicit(self):
+        dt = base_agent.build_destination_target(
+            "hazme un script para limpiar logs", str(self._tmp)
+        )
+        msg = dt.to_guidance_message()
+        self.assertIn("Directorio seleccionado", msg)
+
+
+# ── verify_destination_target ─────────────────────────────────────────────────
+class VerifyDestinationTargetTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp_root = ROOT / ".tmp-tests"
+        self._tmp_root.mkdir(exist_ok=True)
+        self._tmp = self._tmp_root / f"dest-verify-{uuid.uuid4().hex}"
+        self._tmp.mkdir()
+        base_agent.sync_work_dir(str(self._tmp))
+
+    def tearDown(self):
+        base_agent.sync_work_dir(str(ROOT))
+        shutil.rmtree(self._tmp_root, ignore_errors=True)
+
+    def _make_file(self, *rel_parts, content="# ok\n"):
+        p = self._tmp.joinpath(*rel_parts)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+        return p
+
+    def _explicit_target(self, rel_path: str) -> "base_agent.DestinationTarget":
+        from pathlib import Path
+        full = (self._tmp / rel_path).resolve()
+        return base_agent.DestinationTarget(
+            kind="explicit",
+            artifact_type="script",
+            expected_path=full,
+            expected_directory=full.parent,
+            reasoning="test",
+        )
+
+    def _dir_target(self, rel_dir: str, kind: str = "implicit") -> "base_agent.DestinationTarget":
+        full_dir = (self._tmp / rel_dir).resolve()
+        return base_agent.DestinationTarget(
+            kind=kind,
+            artifact_type="script",
+            expected_path=None,
+            expected_directory=full_dir,
+            reasoning="test",
+        )
+
+    # ── no written paths ─────────────────────────────────────────────────
+
+    def test_fails_when_nothing_written(self):
+        dt = self._explicit_target("scripts/foo.py")
+        ok, errors = base_agent.verify_destination_target(dt, [])
+        self.assertFalse(ok)
+        self.assertTrue(any("write_file" in e for e in errors))
+
+    # ── explicit ─────────────────────────────────────────────────────────
+
+    def test_explicit_succeeds_when_exact_path_written(self):
+        f = self._make_file("scripts", "foo.py")
+        dt = self._explicit_target("scripts/foo.py")
+        ok, errors = base_agent.verify_destination_target(dt, [str(f)])
+        self.assertTrue(ok, errors)
+
+    def test_explicit_fails_when_written_to_wrong_path(self):
+        # Write to wrong_dir/foo.py instead of scripts/foo.py
+        f = self._make_file("wrong_dir", "foo.py")
+        dt = self._explicit_target("scripts/foo.py")
+        ok, errors = base_agent.verify_destination_target(dt, [str(f)])
+        self.assertFalse(ok)
+        self.assertTrue(any("exacta" in e for e in errors))
+
+    def test_explicit_fails_when_file_does_not_exist_on_disk(self):
+        # written_paths contains the path but file was not actually created
+        dt = self._explicit_target("scripts/missing.py")
+        ok, errors = base_agent.verify_destination_target(
+            dt, [str(self._tmp / "scripts" / "missing.py")]
+        )
+        self.assertFalse(ok)
+
+    def test_explicit_succeeds_with_correct_path_among_multiple(self):
+        # Agent also created another file; the expected one is present
+        f_correct = self._make_file("scripts", "foo.py")
+        f_other   = self._make_file("other", "bar.py")
+        dt = self._explicit_target("scripts/foo.py")
+        ok, errors = base_agent.verify_destination_target(
+            dt, [str(f_other), str(f_correct)]
+        )
+        self.assertTrue(ok, errors)
+
+    # ── implicit / alias (directory containment) ──────────────────────────
+
+    def test_implicit_succeeds_when_file_inside_expected_dir(self):
+        f = self._make_file("scripts", "cleanup.py")
+        dt = self._dir_target("scripts")
+        ok, errors = base_agent.verify_destination_target(dt, [str(f)])
+        self.assertTrue(ok, errors)
+
+    def test_implicit_fails_when_file_outside_expected_dir(self):
+        f = self._make_file("wrong", "cleanup.py")
+        dt = self._dir_target("scripts")
+        ok, errors = base_agent.verify_destination_target(dt, [str(f)])
+        self.assertFalse(ok)
+        self.assertTrue(any("esperado" in e for e in errors))
+
+    def test_implicit_succeeds_if_any_written_path_is_inside_dir(self):
+        # First file in wrong place, second in right place
+        f_wrong   = self._make_file("wrong", "x.py")
+        f_correct = self._make_file("scripts", "y.py")
+        dt = self._dir_target("scripts")
+        ok, errors = base_agent.verify_destination_target(
+            dt, [str(f_wrong), str(f_correct)]
+        )
+        self.assertTrue(ok, errors)
+
+    def test_alias_same_as_implicit_for_directory_check(self):
+        (self._tmp / "desktop").mkdir()
+        f = self._make_file("desktop", "script.py")
+        dt = self._dir_target("desktop", kind="alias")
+        ok, errors = base_agent.verify_destination_target(dt, [str(f)])
+        self.assertTrue(ok, errors)
+
+    def test_changed_files_in_wrong_dir_not_accepted(self):
+        # Simulates: agent created a file but in a completely unrelated dir.
+        # Ensures changed_paths alone can't fake success.
+        f = self._make_file("totally_unrelated", "script.py")
+        dt = self._dir_target("scripts")
+        ok, errors = base_agent.verify_destination_target(dt, [str(f)])
+        self.assertFalse(ok)
+
+    # ── recovery instruction ──────────────────────────────────────────────
+
+    def test_recovery_mentions_expected_path_for_explicit(self):
+        dt = self._explicit_target("scripts/foo.py")
+        msg = base_agent.build_destination_recovery_instruction(dt, [])
+        self.assertIn("scripts", msg)
+        self.assertIn("foo.py", msg)
+
+    def test_recovery_mentions_expected_dir_for_implicit(self):
+        dt = self._dir_target("scripts")
+        msg = base_agent.build_destination_recovery_instruction(
+            dt, [str(self._tmp / "wrong" / "file.py")]
+        )
+        self.assertIn("scripts", msg)
+        self.assertIn("wrong", msg)   # tells the agent where it created incorrectly
+
+    def test_recovery_mentions_wrong_path(self):
+        f_wrong = self._make_file("other", "foo.py")
+        dt = self._explicit_target("scripts/foo.py")
+        msg = base_agent.build_destination_recovery_instruction(dt, [str(f_wrong)])
+        self.assertIn("other", msg)
+
+    def test_recovery_without_written_paths_is_still_actionable(self):
+        dt = self._dir_target("scripts")
+        msg = base_agent.build_destination_recovery_instruction(dt, [])
+        self.assertGreater(len(msg), 20)
+        self.assertIn("write_file", msg)
+
+    # ── Local / Hybrid alignment ──────────────────────────────────────────
+
+    def test_build_destination_target_available_in_base_agent(self):
+        self.assertTrue(callable(base_agent.build_destination_target))
+
+    def test_verify_destination_target_available_in_base_agent(self):
+        self.assertTrue(callable(base_agent.verify_destination_target))
+
+    def test_build_destination_recovery_available_in_base_agent(self):
+        self.assertTrue(callable(base_agent.build_destination_recovery_instruction))
+
+
 if __name__ == "__main__":
     unittest.main()

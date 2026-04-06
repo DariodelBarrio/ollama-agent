@@ -639,6 +639,47 @@ class VerificationReport:
     checked_paths: list[str]
 
 
+@dataclass
+class DestinationTarget:
+    """Single source of truth for where a file-creation task is expected to land.
+
+    Created once per user turn, propagated through execution, verification and
+    recovery.  Never based on cwd — always anchored to work_dir / root_dir.
+
+    Attributes:
+        kind            "explicit" | "alias" | "implicit"
+        artifact_type   "test" | "doc" | "config" | "module" | "script"
+        expected_path   Full file path when the user gave a concrete path
+                        (explicit) or alias+filename.  None for alias/implicit
+                        when the filename is unknown.
+        expected_directory  Directory the file *must* land in.  Always set.
+        reasoning       Short human-readable explanation for logs and recovery.
+    """
+    kind: str
+    artifact_type: str
+    expected_path: Optional[Path]
+    expected_directory: Optional[Path]
+    reasoning: str
+
+    def to_guidance_message(self) -> str:
+        """Build the [DESTINO] text injected into the LLM guidance context."""
+        if self.kind == "explicit" and self.expected_path:
+            return f"Ruta exacta solicitada: {self.expected_path}"
+        if self.kind == "alias" and self.expected_directory:
+            return (
+                f"Destino alias resuelto. "
+                f"El archivo debe crearse dentro de: {self.expected_directory}"
+            )
+        if self.expected_directory:
+            return (
+                f"No se especificó ruta de destino. "
+                f"Directorio seleccionado por inspección del proyecto: "
+                f"{self.expected_directory} ({self.reasoning}). "
+                f"Crea el archivo ahí salvo que haya un motivo más específico."
+            )
+        return f"Destino inferido: {self.reasoning}"
+
+
 def verify_workspace_changes(
     *,
     expected_paths: Optional[list[str]] = None,
@@ -727,6 +768,179 @@ def build_recovery_instruction(reason: str, report: Optional[VerificationReport]
         "Corrige solo lo necesario, usando herramientas reales, y luego vuelve a verificar. "
         + " ".join(details)
     )
+
+
+# ── DestinationTarget helpers ─────────────────────────────────────────────────
+
+def build_destination_target(user_input: str, work_dir: str) -> Optional[DestinationTarget]:
+    """Build a ``DestinationTarget`` from the current user turn.
+
+    Returns ``None`` when no file-creation intent is detected.
+    The result is always anchored to ``work_dir`` — never to cwd.
+
+    Called once per turn before the executor loop starts so that the object
+    can be propagated through execution, verification and recovery.
+    """
+    if not detect_file_creation_intent(user_input):
+        return None
+
+    kind, value = classify_destination_intent(user_input)
+    artifact_type = infer_artifact_type(user_input)
+    root = Path(work_dir).resolve()
+
+    if kind == "explicit":
+        try:
+            resolved = resolve_in_root(value, work_dir, work_dir)
+            return DestinationTarget(
+                kind="explicit",
+                artifact_type=artifact_type,
+                expected_path=resolved,
+                expected_directory=resolved.parent,
+                reasoning=f"ruta explícita: {value}",
+            )
+        except ValueError:
+            pass  # escapes root → fall through to implicit
+
+    if kind == "alias":
+        try:
+            resolved_str = normalize_workspace_path(value, work_dir)
+            alias_dir = Path(resolved_str).resolve()
+        except ValueError:
+            alias_dir = root
+        return DestinationTarget(
+            kind="alias",
+            artifact_type=artifact_type,
+            expected_path=None,
+            expected_directory=alias_dir,
+            reasoning=f"alias '{value}' → {alias_dir}",
+        )
+
+    # implicit (or explicit that escaped root)
+    target_dir_str, select_reasoning = select_target_directory(artifact_type, work_dir)
+    return DestinationTarget(
+        kind="implicit",
+        artifact_type=artifact_type,
+        expected_path=None,
+        expected_directory=Path(target_dir_str).resolve(),
+        reasoning=select_reasoning,
+    )
+
+
+def verify_destination_target(
+    target: DestinationTarget,
+    written_paths: list[str],
+) -> tuple[bool, list[str]]:
+    """Check that at least one written file is in the expected location.
+
+    Semantics by kind:
+
+    - ``explicit``: the exact ``expected_path`` must have been written and must
+      exist on disk.  Writing to any other path does NOT count as success.
+    - ``alias`` / ``implicit``: at least one ``written_paths`` entry must be
+      inside ``expected_directory`` and exist on disk.
+
+    Returns ``(ok, errors)`` where *errors* is empty when ``ok`` is True.
+    """
+    errors: list[str] = []
+
+    if not written_paths:
+        errors.append("no se creó ningún archivo con write_file()")
+        return False, errors
+
+    if target.kind == "explicit" and target.expected_path is not None:
+        expected = target.expected_path.resolve()
+        # Resolve every written path, ignore ones that can't be resolved
+        created_resolved: list[Path] = []
+        for cp in written_paths:
+            try:
+                created_resolved.append(Path(cp).resolve())
+            except Exception:
+                pass
+
+        if expected not in created_resolved:
+            misplaced = [str(p) for p in created_resolved if p != expected]
+            msg = (
+                f"archivo no creado en la ruta exacta requerida — "
+                f"esperado: {expected}"
+            )
+            if misplaced:
+                msg += f" — creado en: {misplaced[0]}"
+            errors.append(msg)
+            return False, errors
+
+        if not expected.exists():
+            errors.append(f"la ruta esperada no existe en disco: {expected}")
+            return False, errors
+
+        return True, []
+
+    # alias or implicit: directory containment
+    if target.expected_directory is not None:
+        expected_dir = target.expected_directory.resolve()
+        for cp in written_paths:
+            try:
+                cp_resolved = Path(cp).resolve()
+                cp_resolved.relative_to(expected_dir)   # raises ValueError if not inside
+                if cp_resolved.exists():
+                    return True, []
+            except (ValueError, Exception):
+                pass
+
+        created_str = ", ".join(written_paths[:2])
+        errors.append(
+            f"ningún archivo creado está dentro del directorio esperado — "
+            f"esperado dentro de: {target.expected_directory} — "
+            f"creado en: {created_str or '(ninguno)'}"
+        )
+        return False, errors
+
+    return True, []   # no constraint → always ok
+
+
+def build_destination_recovery_instruction(
+    target: DestinationTarget,
+    written_paths: list[str],
+) -> str:
+    """Build a recovery message that tells the agent exactly where the file must go."""
+    parts: list[str] = ["El intento anterior no creó el archivo en el lugar correcto."]
+
+    if target.kind == "explicit" and target.expected_path:
+        parts.append(f"DESTINO REQUERIDO (exacto): {target.expected_path}")
+        if written_paths:
+            parts.append(f"Creaste el archivo en: {written_paths[0]}")
+            parts.append(
+                "Muévelo con move_file() o vuelve a crearlo con write_file() "
+                "usando la ruta exacta indicada."
+            )
+        else:
+            parts.append(
+                f"No se creó ningún archivo. "
+                f"Usa write_file() con la ruta: {target.expected_path}"
+            )
+    elif target.expected_directory:
+        parts.append(f"DIRECTORIO REQUERIDO: {target.expected_directory}")
+        if written_paths:
+            parts.append(f"Creaste el archivo en: {written_paths[0]}")
+            parts.append(
+                "El archivo debe estar dentro del directorio indicado. "
+                "Muévelo con move_file() o vuelve a crearlo con write_file() "
+                "dentro de ese directorio."
+            )
+        else:
+            if not target.expected_directory.exists():
+                parts.append(
+                    f"El directorio no existe aún — créalo con "
+                    f"create_directory('{target.expected_directory}') y luego usa write_file()."
+                )
+            else:
+                parts.append(
+                    "No se creó ningún archivo. "
+                    f"Usa write_file() con una ruta dentro de {target.expected_directory}."
+                )
+    else:
+        parts.append("Usa write_file() para crear el archivo.")
+
+    return " ".join(parts)
 
 
 # â”€â”€ UI helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

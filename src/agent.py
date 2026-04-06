@@ -38,6 +38,10 @@ from base_agent import (
     extract_candidate_paths,
     classify_destination_intent,
     select_target_directory,
+    DestinationTarget,
+    build_destination_target,
+    verify_destination_target,
+    build_destination_recovery_instruction,
     get_workspace_placeholder_targets,
     normalize_path_in_workspace,
     resolve_in_workspace,
@@ -641,42 +645,38 @@ class Agent:
             if plan:
                 guidance_messages.append({"role": "system", "content": f"[PLAN INTERNO]\n{plan}"})
 
-            candidates = extract_candidate_paths(user_input)
-            expected_paths: list[str] = candidates[:1]
+            # ── Destination target ────────────────────────────────────────────
+            # Build once per turn; propagated to guidance, verification, recovery.
+            dest_target: Optional[DestinationTarget] = build_destination_target(
+                user_input, self.work_dir
+            )
+            if dest_target:
+                guidance_messages.append({
+                    "role": "system",
+                    "content": f"[DESTINO]\n{dest_target.to_guidance_message()}",
+                })
+                self.logger.debug(
+                    "Destino del turno",
+                    extra={"tool_args": {
+                        "kind": dest_target.kind,
+                        "artifact": dest_target.artifact_type,
+                        "dir": str(dest_target.expected_directory),
+                        "path": str(dest_target.expected_path) if dest_target.expected_path else None,
+                        "reason": dest_target.reasoning,
+                    }},
+                )
+
+            # expected_paths for snapshot + general verify (explicit only)
+            expected_paths: list[str] = (
+                [str(dest_target.expected_path)]
+                if dest_target and dest_target.expected_path
+                else []
+            )
             changed_files: list[str] = []
+            written_paths: list[str] = []   # tracks write_file / move_file destinations
             test_results: list[dict] = []
             recovery_count = 0
             critic_fix_used = False
-
-            # ── Destination directive ─────────────────────────────────────────
-            # Classify where the user wants the file, then inject a directive so
-            # the LLM knows the right directory without guessing from cwd.
-            if detect_file_creation_intent(user_input):
-                intent_kind, intent_value = classify_destination_intent(user_input)
-                if intent_kind == "explicit":
-                    destination_msg = f"Ruta exacta solicitada: {intent_value}"
-                elif intent_kind == "alias":
-                    resolved_alias = normalize_path_in_workspace(intent_value)
-                    destination_msg = (
-                        f"El usuario indicó destino alias '{intent_value}'. "
-                        f"Ruta resuelta dentro del workspace: {resolved_alias}"
-                    )
-                else:  # implicit
-                    target_dir, reasoning = select_target_directory(intent_value, self.work_dir)
-                    destination_msg = (
-                        f"No se especificó ruta de destino. "
-                        f"Directorio seleccionado por inspección del proyecto: {target_dir} "
-                        f"({reasoning}). "
-                        f"Crea el archivo ahí salvo que haya un motivo más específico."
-                    )
-                    self.logger.debug(
-                        "Destino implícito inferido",
-                        extra={"tool_args": {"artifact": intent_value, "dir": target_dir, "reason": reasoning}},
-                    )
-                guidance_messages.append({
-                    "role": "system",
-                    "content": f"[DESTINO]\n{destination_msg}",
-                })
 
             before_snapshots = snapshot_workspace_files(expected_paths)
 
@@ -752,23 +752,16 @@ class Agent:
                                         command_text = str(fn_args.get("command", ""))
                                         if requested_test_validation(user_input) or re.search(r"\b(test|pytest|unittest|cargo test)\b", command_text, re.I):
                                             test_results.append(result)
+                                    # Track write_file / move_file destinations for destination verification
                                     if fn_name == "write_file" and "error" not in result:
-                                        target = result.get("path") or fn_args.get("path")
-                                        if target:
-                                            try:
-                                                target_path = resolve_in_workspace(str(target)).resolve()
-                                            except ValueError:
-                                                target_path = None
-                                            expected_resolved = None
-                                            if expected_paths:
-                                                try:
-                                                    expected_resolved = resolve_in_workspace(expected_paths[0]).resolve()
-                                                except ValueError:
-                                                    expected_resolved = None
-                                            if target_path is not None and (
-                                                expected_resolved is None or target_path == expected_resolved
-                                            ):
-                                                file_created = True
+                                        path_hint = result.get("path") or fn_args.get("path")
+                                        if path_hint:
+                                            written_paths.append(str(path_hint))
+                                            file_created = True
+                                    if fn_name == "move_file" and "error" not in result:
+                                        dst_hint = result.get("to") or fn_args.get("dst")
+                                        if dst_hint:
+                                            written_paths.append(str(dst_hint))
                             else:
                                 result = {"error": f"Tool desconocida: {fn_name}"}
                                 self.logger.error("Tool desconocida",
@@ -797,6 +790,37 @@ class Agent:
                         break
 
                 emit_role_result("executor", "ok", f"{len(changed_files)} cambios rastreados")
+
+                # ── Destination verification (runs before general verify) ──────
+                # Checks that the file landed exactly where DestinationTarget says.
+                # Explicit: must match the exact path.
+                # Alias / implicit: must be inside expected_directory.
+                if dest_target and detect_file_creation_intent(user_input):
+                    emit_role_event("verifier", f"destino {dest_target.kind}")
+                    dest_ok, dest_errors = verify_destination_target(dest_target, written_paths)
+                    if dest_ok:
+                        emit_role_result("verifier", "ok", f"archivo en {dest_target.expected_directory or dest_target.expected_path}")
+                    else:
+                        emit_role_result("verifier", "fail", "; ".join(dest_errors[:2]))
+                        self.logger.warning(
+                            "Verificación de destino fallida",
+                            extra={"tool_args": {
+                                "kind": dest_target.kind,
+                                "expected_dir": str(dest_target.expected_directory),
+                                "expected_path": str(dest_target.expected_path) if dest_target.expected_path else None,
+                                "written": written_paths,
+                                "errors": dest_errors,
+                            }},
+                        )
+                        if recovery_count < self.max_recovery_attempts:
+                            recovery_count += 1
+                            retry_instruction = self.recovery_retry(
+                                build_destination_recovery_instruction(dest_target, written_paths)
+                            )
+                            self.messages.append({"role": "user", "content": retry_instruction})
+                            continue
+
+                # ── General workspace verification ────────────────────────────
                 report = None
                 if self.guided_mode and should_verify_task(user_input, changed_files):
                     emit_role_event("verifier", user_input)
