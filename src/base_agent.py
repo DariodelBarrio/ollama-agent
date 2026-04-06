@@ -944,6 +944,51 @@ def build_destination_recovery_instruction(
 
 
 # â”€â”€ UI helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+def resolve_canonical_write_path(
+    proposed: str,
+    target: "DestinationTarget",
+    work_dir: str,
+) -> "Optional[str]":
+    """Return the canonical path that write_file() should use given the active target.
+
+    Called in the executor loop *before* invoking the tool so that the model
+    cannot land the file in a wrong directory even if it constructs a bad path.
+
+    Semantics:
+    - explicit  -> always returns str(target.expected_path), ignoring proposed.
+    - alias / implicit -> if proposed resolves *inside* target.expected_directory
+      it is returned unchanged; otherwise the filename is extracted from proposed
+      and the canonical path is expected_directory / filename.
+
+    Returns None when no canonicalization can be determined (e.g. proposed has
+    no filename component).  The caller should leave fn_args untouched in that case.
+    """
+    from common_runtime import normalize_workspace_path  # local import to avoid circularity
+
+    if target.kind == "explicit" and target.expected_path is not None:
+        return str(target.expected_path)
+
+    if target.expected_directory is None:
+        return None
+
+    expected_dir = target.expected_directory.resolve()
+
+    # Try resolving proposed to check if it already lands inside expected_directory.
+    try:
+        resolved = Path(normalize_workspace_path(proposed, work_dir)).resolve()
+        resolved.relative_to(expected_dir)  # raises ValueError when outside
+        return str(resolved)
+    except (ValueError, Exception):
+        pass
+
+    # Proposed path is outside expected_directory -- extract filename and redirect.
+    filename = Path(proposed).name
+    if not filename:
+        return None
+
+    return str(expected_dir / filename)
+
+
 _TOOL_LABELS: dict = {
     "edit_file":        ("Update",    "path"),
     "write_file":       ("Write",     "path"),

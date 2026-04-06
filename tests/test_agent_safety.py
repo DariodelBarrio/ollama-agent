@@ -8,6 +8,7 @@ through base_agent directly (they live there now).  Hybrid-specific features
 import gc
 import importlib.util
 import shutil
+import tempfile
 import sqlite3
 import sys
 import unittest
@@ -1210,6 +1211,113 @@ class VerifyDestinationTargetTests(unittest.TestCase):
 
     def test_build_destination_recovery_available_in_base_agent(self):
         self.assertTrue(callable(base_agent.build_destination_recovery_instruction))
+
+
+class CanonicalWritePathTests(unittest.TestCase):
+    """Tests for resolve_canonical_write_path — the pre-tool path enforcer."""
+
+    def _root(self) -> str:
+        return str(Path(tempfile.mkdtemp()).resolve())
+
+    def _explicit_target(self, root: str, rel: str) -> base_agent.DestinationTarget:
+        p = Path(root) / rel
+        return base_agent.DestinationTarget(
+            kind="explicit",
+            artifact_type="script",
+            expected_path=p,
+            expected_directory=p.parent,
+            reasoning="ruta explícita",
+        )
+
+    def _dir_target(self, root: str, rel: str, kind: str = "alias") -> base_agent.DestinationTarget:
+        d = Path(root) / rel
+        return base_agent.DestinationTarget(
+            kind=kind,
+            artifact_type="script",
+            expected_path=None,
+            expected_directory=d,
+            reasoning="alias/implicit",
+        )
+
+    def test_explicit_always_returns_expected_path(self):
+        """explicit target always returns expected_path, ignoring whatever the model proposed."""
+        root = self._root()
+        target = self._explicit_target(root, "src/utils/parser.py")
+        result = base_agent.resolve_canonical_write_path(
+            "documents/desktop/parser.py", target, root
+        )
+        self.assertEqual(result, str(target.expected_path))
+
+    def test_explicit_ignores_correct_looking_path_too(self):
+        """Even if proposed looks right, explicit always uses expected_path."""
+        root = self._root()
+        target = self._explicit_target(root, "src/utils/parser.py")
+        result = base_agent.resolve_canonical_write_path(
+            "src/utils/parser.py", target, root
+        )
+        self.assertEqual(result, str(target.expected_path))
+
+    def test_alias_proposed_already_inside_expected_dir(self):
+        """alias target: if proposed resolves inside expected_directory, return it unchanged."""
+        root = self._root()
+        desktop = Path(root) / "desktop"
+        desktop.mkdir()
+        target = self._dir_target(root, "desktop", kind="alias")
+        # Simulate model providing the correct path
+        proposed = str(desktop / "script.py")
+        result = base_agent.resolve_canonical_write_path(proposed, target, root)
+        self.assertEqual(Path(result).resolve(), (desktop / "script.py").resolve())
+
+    def test_alias_model_uses_wrong_directory(self):
+        """alias target: documents/desktop/x.py should be redirected to desktop/x.py."""
+        root = self._root()
+        (Path(root) / "desktop").mkdir()
+        (Path(root) / "documents").mkdir()
+        target = self._dir_target(root, "desktop", kind="alias")
+        proposed = str(Path(root) / "documents" / "desktop" / "script.py")
+        result = base_agent.resolve_canonical_write_path(proposed, target, root)
+        expected = str((Path(root) / "desktop" / "script.py").resolve())
+        self.assertEqual(Path(result).resolve(), Path(expected).resolve())
+
+    def test_alias_wrong_dir_extracts_filename(self):
+        """Filename is preserved when redirecting a bad path."""
+        root = self._root()
+        (Path(root) / "desktop").mkdir()
+        target = self._dir_target(root, "desktop", kind="alias")
+        proposed = str(Path(root) / "somewhere_else" / "my_tool.py")
+        result = base_agent.resolve_canonical_write_path(proposed, target, root)
+        self.assertTrue(result.endswith("my_tool.py"), result)
+        self.assertIn("desktop", result)
+
+    def test_implicit_model_sends_to_arbitrary_folder(self):
+        """implicit target: model sends to cwd root, should be redirected to expected_dir."""
+        root = self._root()
+        (Path(root) / "scripts").mkdir()
+        target = self._dir_target(root, "scripts", kind="implicit")
+        proposed = str(Path(root) / "helper.py")
+        result = base_agent.resolve_canonical_write_path(proposed, target, root)
+        self.assertIn("scripts", result)
+        self.assertTrue(result.endswith("helper.py"), result)
+
+    def test_implicit_proposed_inside_expected_dir_unchanged(self):
+        """implicit target: if model already picks the right dir, don't change it."""
+        root = self._root()
+        scripts = Path(root) / "scripts"
+        scripts.mkdir()
+        target = self._dir_target(root, "scripts", kind="implicit")
+        proposed = str(scripts / "helper.py")
+        result = base_agent.resolve_canonical_write_path(proposed, target, root)
+        self.assertEqual(Path(result).resolve(), (scripts / "helper.py").resolve())
+
+    def test_empty_proposed_path_returns_none(self):
+        """No filename in proposed → return None (caller leaves fn_args unchanged)."""
+        root = self._root()
+        target = self._dir_target(root, "desktop", kind="alias")
+        result = base_agent.resolve_canonical_write_path("", target, root)
+        self.assertIsNone(result)
+
+    def test_function_available_in_base_agent(self):
+        self.assertTrue(callable(base_agent.resolve_canonical_write_path))
 
 
 if __name__ == "__main__":

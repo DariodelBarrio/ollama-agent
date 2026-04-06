@@ -42,6 +42,7 @@ from base_agent import (
     build_destination_target,
     verify_destination_target,
     build_destination_recovery_instruction,
+    resolve_canonical_write_path,
     get_workspace_placeholder_targets,
     normalize_path_in_workspace,
     resolve_in_workspace,
@@ -717,6 +718,24 @@ class Agent:
                                         extra={"tool_name": fn_name, "error_details": fn_args["error"]}
                                     )
                                 else:
+                                    # ── Canonical path enforcement ─────────────────────────
+                                    # When a DestinationTarget is active, rewrite write_file's
+                                    # path argument to the canonical location before the tool
+                                    # executes.  This prevents the model from placing the file
+                                    # in a wrong directory (e.g. documents/desktop/...) when
+                                    # the inferred target was desktop/.
+                                    if fn_name == "write_file" and dest_target is not None:
+                                        proposed = str(fn_args.get("path", ""))
+                                        if proposed:
+                                            canonical = resolve_canonical_write_path(
+                                                proposed, dest_target, self.work_dir
+                                            )
+                                            if canonical and canonical != proposed:
+                                                self.logger.debug(
+                                                    "Ruta write_file canonicalizada",
+                                                    extra={"tool_args": {"proposed": proposed, "canonical": canonical}},
+                                                )
+                                                fn_args = {**fn_args, "path": canonical}
                                     tracked_paths: list[str] = []
                                     if fn_name in {"write_file", "edit_file", "read_file", "delete_file", "create_directory", "change_directory"}:
                                         if fn_args.get("path"):
