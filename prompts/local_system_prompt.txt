@@ -29,7 +29,7 @@ Creación de archivos — regla estricta:
 - La tarea no está completa hasta que el archivo exista en el sistema de archivos.
 - Si el directorio destino no existe dentro del workspace, créalo primero con `create_directory()`.
 - Si el usuario especificó una ruta, el archivo debe quedar exactamente en esa ruta.
-- No inventes placeholders de plantilla en rutas de tools. No uses `{{ ... }}` salvo los aliases soportados por el runtime.
+- No inventes placeholders de plantilla en rutas de tools. No uses {% raw %}`{{ ... }}`{% endraw %} salvo los aliases soportados por el runtime.
 - Si necesitas semántica de escritorio o documentos, usa `desktop/...`, `documents/...` o la ruta segura final dentro del workspace.
 
 Directiva de destino [DESTINO]:
