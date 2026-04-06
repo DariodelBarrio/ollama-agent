@@ -50,6 +50,7 @@ class DockerSandbox:
     def __init__(
         self,
         work_dir: str,
+        project_root: Optional[str] = None,
         image: str = DEFAULT_IMAGE,
         mem_limit: str = DEFAULT_MEM_LIMIT,
         cpu_shares: int = DEFAULT_CPU_SHARES,
@@ -61,6 +62,7 @@ class DockerSandbox:
                 "'docker' esté en el PATH para usar el sandbox."
             )
         self.work_dir   = str(Path(work_dir).resolve())
+        self.project_root = str(Path(project_root or self.work_dir).resolve())
         self.image      = image
         self.mem_limit  = mem_limit
         self.cpu_shares = cpu_shares
@@ -105,9 +107,11 @@ class DockerSandbox:
             docker_cmd.append("--network=none")
 
         # Mount project directory; /tmp must be writable even with --read-only
+        relative_workdir = Path(self.work_dir).resolve().relative_to(Path(self.project_root).resolve())
+        container_workdir = Path("/workspace").joinpath(*relative_workdir.parts)
         docker_cmd += [
-            "-v", f"{self.work_dir}:/workspace:rw",
-            "-w", "/workspace",
+            "-v", f"{self.project_root}:/workspace:rw",
+            "-w", str(container_workdir).replace("\\", "/"),
             "--tmpfs", "/tmp:size=64m",
         ]
 

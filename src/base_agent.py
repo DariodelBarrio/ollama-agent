@@ -124,20 +124,28 @@ def make_logger(name: str, path: Path) -> logging.Logger:
 # Module-level mutable state. A single ToolRuntime serves both agent variants
 # in a given process (only one agent runs per process at a time).
 _WORK_DIR: str = "."
-_ROOT_DIR: str = str(Path(".").resolve())
+_PROJECT_ROOT: str = str(Path(".").resolve())
+_ROOT_DIR: str = _PROJECT_ROOT
 _READ_ONLY: bool = False
-_TOOL_RUNTIME: ToolRuntime = ToolRuntime(_WORK_DIR, _ROOT_DIR)
+_TOOL_RUNTIME: ToolRuntime = ToolRuntime(_WORK_DIR, project_root=_PROJECT_ROOT)
 
-def sync_work_dir(work_dir: str, root_dir: Optional[str] = None, read_only: Optional[bool] = None) -> None:
+def sync_work_dir(
+    work_dir: str,
+    root_dir: Optional[str] = None,
+    *,
+    project_root: Optional[str] = None,
+    read_only: Optional[bool] = None,
+) -> None:
     """Sincroniza el runtime compartido con el workspace del agente activo.
 
     Este mÃ³dulo vive como singleton de proceso. Cada agente debe llamar aquÃ­
     al arrancar para que todas las tools operen sobre el directorio correcto.
     """
-    global _WORK_DIR, _ROOT_DIR, _READ_ONLY
+    global _WORK_DIR, _PROJECT_ROOT, _ROOT_DIR, _READ_ONLY
     _WORK_DIR = str(Path(work_dir).resolve())
-    _ROOT_DIR = str(Path(root_dir).resolve()) if root_dir else _WORK_DIR
-    _TOOL_RUNTIME.set_workspace(_WORK_DIR, _ROOT_DIR)
+    _PROJECT_ROOT = str(Path(project_root or root_dir or _WORK_DIR).resolve())
+    _ROOT_DIR = _PROJECT_ROOT
+    _TOOL_RUNTIME.set_workspace(_WORK_DIR, project_root=_PROJECT_ROOT)
     if read_only is not None:
         _READ_ONLY = read_only
     _TOOL_RUNTIME.set_mode(_READ_ONLY)
@@ -153,6 +161,11 @@ def get_root_dir() -> str:
     return _ROOT_DIR
 
 
+def get_project_root() -> str:
+    """Devuelve la raÃ­z estable del proyecto actual."""
+    return _PROJECT_ROOT
+
+
 def is_read_only_mode() -> bool:
     return _READ_ONLY
 
@@ -165,7 +178,7 @@ def set_read_only_mode(read_only: bool) -> None:
 
 def resolve_path(path: str) -> Path:
     """Resolve a path; raises ValueError if it escapes root."""
-    _TOOL_RUNTIME.set_workspace(_WORK_DIR, _ROOT_DIR)
+    _TOOL_RUNTIME.set_workspace(_WORK_DIR, project_root=_PROJECT_ROOT)
     return _TOOL_RUNTIME.resolve(path)
 
 
@@ -173,12 +186,14 @@ def _wrap_tool(method_name: str):
     """Wrap a ToolRuntime method so it auto-syncs work_dir before/after calls."""
     @wraps(getattr(_TOOL_RUNTIME, method_name))
     def _wrapped(*args, **kwargs):
-        global _WORK_DIR
-        _TOOL_RUNTIME.set_workspace(_WORK_DIR, _ROOT_DIR)
+        global _WORK_DIR, _PROJECT_ROOT, _ROOT_DIR
+        _TOOL_RUNTIME.set_workspace(_WORK_DIR, project_root=_PROJECT_ROOT)
         _TOOL_RUNTIME.set_mode(_READ_ONLY)
         result = getattr(_TOOL_RUNTIME, method_name)(*args, **kwargs)
         # Sync back: change_directory may have updated work_dir on the runtime
         _WORK_DIR = _TOOL_RUNTIME.work_dir
+        _PROJECT_ROOT = _TOOL_RUNTIME.project_root
+        _ROOT_DIR = _PROJECT_ROOT
         return result
     return _wrapped
 
@@ -772,11 +787,16 @@ def build_recovery_instruction(reason: str, report: Optional[VerificationReport]
 
 # ── DestinationTarget helpers ─────────────────────────────────────────────────
 
-def build_destination_target(user_input: str, work_dir: str) -> Optional[DestinationTarget]:
+def build_destination_target(
+    user_input: str,
+    work_dir: str,
+    project_root: Optional[str] = None,
+) -> Optional[DestinationTarget]:
     """Build a ``DestinationTarget`` from the current user turn.
 
     Returns ``None`` when no file-creation intent is detected.
-    The result is always anchored to ``work_dir`` — never to cwd.
+    The result is always anchored to ``project_root`` for project semantics and
+    uses ``work_dir`` only for relative-path resolution.
 
     Called once per turn before the executor loop starts so that the object
     can be propagated through execution, verification and recovery.
@@ -786,11 +806,12 @@ def build_destination_target(user_input: str, work_dir: str) -> Optional[Destina
 
     kind, value = classify_destination_intent(user_input)
     artifact_type = infer_artifact_type(user_input)
-    root = Path(work_dir).resolve()
+    resolved_work_dir = Path(work_dir).resolve()
+    resolved_project_root = Path(project_root or work_dir).resolve()
 
     if kind == "explicit":
         try:
-            resolved = resolve_in_root(value, work_dir, work_dir)
+            resolved = resolve_in_root(value, str(resolved_work_dir), str(resolved_project_root))
             return DestinationTarget(
                 kind="explicit",
                 artifact_type=artifact_type,
@@ -803,10 +824,10 @@ def build_destination_target(user_input: str, work_dir: str) -> Optional[Destina
 
     if kind == "alias":
         try:
-            resolved_str = normalize_workspace_path(value, work_dir)
+            resolved_str = normalize_workspace_path(value, str(resolved_project_root))
             alias_dir = Path(resolved_str).resolve()
         except ValueError:
-            alias_dir = root
+            alias_dir = resolved_project_root
         return DestinationTarget(
             kind="alias",
             artifact_type=artifact_type,
@@ -816,7 +837,7 @@ def build_destination_target(user_input: str, work_dir: str) -> Optional[Destina
         )
 
     # implicit (or explicit that escaped root)
-    target_dir_str, select_reasoning = select_target_directory(artifact_type, work_dir)
+    target_dir_str, select_reasoning = select_target_directory(artifact_type, str(resolved_project_root))
     return DestinationTarget(
         kind="implicit",
         artifact_type=artifact_type,
@@ -948,6 +969,7 @@ def resolve_canonical_write_path(
     proposed: str,
     target: "DestinationTarget",
     work_dir: str,
+    project_root: Optional[str] = None,
 ) -> "Optional[str]":
     """Return the canonical path that write_file() should use given the active target.
 
@@ -963,7 +985,7 @@ def resolve_canonical_write_path(
     Returns None when no canonicalization can be determined (e.g. proposed has
     no filename component).  The caller should leave fn_args untouched in that case.
     """
-    from common_runtime import normalize_workspace_path  # local import to avoid circularity
+    resolved_project_root = str(Path(project_root or work_dir).resolve())
 
     if target.kind == "explicit" and target.expected_path is not None:
         return str(target.expected_path)
@@ -975,7 +997,7 @@ def resolve_canonical_write_path(
 
     # Try resolving proposed to check if it already lands inside expected_directory.
     try:
-        resolved = Path(normalize_workspace_path(proposed, work_dir)).resolve()
+        resolved = resolve_in_root(proposed, work_dir, resolved_project_root)
         resolved.relative_to(expected_dir)  # raises ValueError when outside
         return str(resolved)
     except (ValueError, Exception):
@@ -1019,17 +1041,17 @@ def _rel(path_str: str) -> str:
 
 def resolve_in_workspace(path_str: str) -> Path:
     """Resolve a path inside the current workspace root."""
-    return resolve_in_root(path_str, _WORK_DIR, _ROOT_DIR)
+    return resolve_in_root(path_str, _WORK_DIR, _PROJECT_ROOT)
 
 
 def normalize_path_in_workspace(path_str: str) -> str:
     """Normalize placeholders and aliases against the current workspace root."""
-    return normalize_workspace_path(path_str, _ROOT_DIR)
+    return normalize_workspace_path(path_str, _PROJECT_ROOT)
 
 
 def get_workspace_placeholder_targets() -> dict[str, str]:
     """Return prompt-friendly deterministic targets for supported placeholders."""
-    return {key: str(value) for key, value in special_workspace_paths(_ROOT_DIR).items()}
+    return {key: str(value) for key, value in special_workspace_paths(_PROJECT_ROOT).items()}
 
 
 def _render_inline(text: str) -> Text:

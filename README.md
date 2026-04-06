@@ -113,6 +113,9 @@ python src/hybrid/agent.py --model qwen2.5-coder:14b --dir /path/to/project --ba
 
 Parameter semantics:
 
+- `--dir` now means the stable project root. It is also used as the initial working directory for the session.
+- `change_directory()` only changes the active working directory; it does not redefine the project.
+- semantic aliases such as `desktop`, `documents`, and `workspace` always resolve from the project root.
 - `--ctx` controls the backend token budget or context window hint, not a guaranteed output length.
 - `--api-base` and `--local-url` both mean an OpenAI-compatible local backend endpoint.
 - `--backend` in Hybrid chooses `auto`, `local`, `groq`, or `remote`.
@@ -189,7 +192,7 @@ At a high level:
 
 1. The CLI entry point loads a system prompt and repository context.
 2. The model receives tool definitions for file, shell, and optional web tasks.
-3. Shared runtime modules execute tool calls inside the workspace.
+3. Shared runtime modules execute tool calls inside the project root while keeping a separate mutable working directory.
 4. The agent loops until the task is complete or the user exits.
 
 Core modules:
@@ -214,10 +217,10 @@ isolation.
 
 What it does:
 
-- constrains file operations to the workspace root
+- constrains file operations to the project root
 - resolves paths canonically before acting on them
 - blocks a set of clearly destructive shell patterns
-- prevents directory changes outside the root workspace
+- prevents directory changes outside the project root
 
 What it does not do:
 

@@ -30,7 +30,7 @@ from base_agent import (
     C_LOGO, C_BORDER, C_TEXT, C_ROUTER, C_CRITIC,
     console,
     _JsonFmt, make_logger as _make_logger,
-    sync_work_dir, get_work_dir, build_agent_tools,
+    sync_work_dir, get_work_dir, get_project_root, build_agent_tools,
     run_command, read_file, write_file, edit_file, find_files, grep,
     list_directory, delete_file, create_directory, move_file,
     search_web, fetch_url, change_directory,
@@ -520,7 +520,8 @@ class Agent:
                  guided_mode: bool = False):
         global _mem
         self.model      = model
-        self.work_dir   = str(Path(work_dir).resolve())
+        self.project_root = str(Path(work_dir).resolve())
+        self.work_dir   = self.project_root
         self.tag        = tag + (" ★" if critic else "")
         self.ctx        = ctx
         self.temp       = temp
@@ -537,7 +538,7 @@ class Agent:
         self.system_prompt_path = Path(system_prompt_path).resolve() if system_prompt_path else None
 
         # Sync shared tool runtime to this agent's working directory
-        sync_work_dir(self.work_dir, read_only=read_only)
+        sync_work_dir(self.work_dir, project_root=self.project_root, read_only=read_only)
         self.tools = build_agent_tools(
             include_web=True,
             extra_tools=READ_WRITE_TOOLS[len(BASE_TOOLS):],
@@ -556,6 +557,7 @@ class Agent:
                 if DOCKER_AVAILABLE:
                     self._sandbox = DockerSandbox(
                         work_dir=self.work_dir,
+                        project_root=self.project_root,
                         image=sandbox_image,
                     )
                     if not self._sandbox.ensure_image():
@@ -590,7 +592,7 @@ class Agent:
             self.selected_backend = "local"
 
         self.router = SmartRouter(force=None if backend == "auto" else backend)
-        self.logger = _make_logger(f"hybrid.{id(self)}", Path(self.work_dir) / "agent_session.jsonl")
+        self.logger = _make_logger(f"hybrid.{id(self)}", Path(self.project_root) / "agent_session.jsonl")
 
         # Memoria persistente SQLite + FTS5
         _mem = MemoryDB(_SCRIPT_DIR / "memory.db")
@@ -706,7 +708,7 @@ class Agent:
                 console.print(f"[{C_DIM}]  Crítico: {'ON' if self.critic else 'OFF'}[/]")
         elif c == "/ast":
             console.print(f"[{C_DIM}]  Escaneando proyecto...[/]")
-            ast_out = scan_project_ast(self.work_dir)
+            ast_out = scan_project_ast(self.project_root)
             console.print(Panel(ast_out[:3000], title="AST Skeleton", border_style=C_BORDER))
         elif c == "/plan":
             if arg:
@@ -1025,8 +1027,13 @@ No repitas lo que se hizo, solo señala problemas si los hay."""
     def _invoke_tool(self, fn_name: str, fn_args: dict) -> dict:
         try:
             if fn_name == "run_command" and self._sandbox is not None:
+                self._sandbox.work_dir = self.work_dir
+                self._sandbox.project_root = self.project_root
                 return self._sandbox.run(**fn_args)
-            return TOOL_MAP[fn_name](**fn_args)
+            result = TOOL_MAP[fn_name](**fn_args)
+            self.work_dir = get_work_dir()
+            self.project_root = get_project_root()
+            return result
         except Exception as e:
             self.logger.error(
                 "Excepción en herramienta",
@@ -1111,7 +1118,7 @@ No repitas lo que se hizo, solo señala problemas si los hay."""
 
     def run(self):
         def _make_system_prompt() -> str:
-            project_context = load_project_context(self.work_dir)
+            project_context = load_project_context(self.project_root)
             memories_text = self.memdb.format_for_prompt(limit=6)
             return render_shared_prompt(
                 template_name="hybrid_system_prompt.txt",
@@ -1131,7 +1138,7 @@ No repitas lo que se hizo, solo señala problemas si los hay."""
 
         self.logger.info("Sesión iniciada", extra={"tool_args": {
             "model": self.model, "backend": self.router.force or "auto",
-            "work_dir": self.work_dir, "critic": self.critic, "guided_mode": self.guided_mode,
+            "project_root": self.project_root, "work_dir": self.work_dir, "critic": self.critic, "guided_mode": self.guided_mode,
         }})
 
         # Detectar backend inicial para el header
@@ -1199,7 +1206,7 @@ No repitas lo que se hizo, solo señala problemas si los hay."""
 
             # ── Destination target ────────────────────────────────────────────
             dest_target: Optional[DestinationTarget] = build_destination_target(
-                user_input, self.work_dir
+                user_input, self.work_dir, self.project_root
             )
             _file_intent = dest_target is not None
             if dest_target:
@@ -1279,7 +1286,7 @@ No repitas lo que se hizo, solo señala problemas si los hay."""
                                     proposed = str(fn_args.get("path", ""))
                                     if proposed:
                                         canonical = resolve_canonical_write_path(
-                                            proposed, dest_target, self.work_dir
+                                            proposed, dest_target, self.work_dir, self.project_root
                                         )
                                         if canonical and canonical != proposed:
                                             self.logger.debug(
@@ -1513,7 +1520,7 @@ def select_model_menu(local_url: str) -> str:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Agente Hybrid local/cloud para Ollama Agent")
     parser.add_argument("--model",        default=None,                    help="Modelo principal; si coincide con uno de Groq, selecciona Groq salvo override")
-    parser.add_argument("--dir",          default=".",                     help="Directorio de trabajo")
+    parser.add_argument("--dir",          default=".",                     help="Raíz del proyecto; también se usa como directorio de trabajo inicial")
     parser.add_argument("--tag",          default="HYBRID",               help="Etiqueta visible en el header")
     parser.add_argument("--ctx",          type=int,   default=32768,       help="Ventana de contexto o presupuesto de tokens del backend local")
     parser.add_argument("--temp",         type=float, default=0.15,        help="Temperatura 0.0-1.0")

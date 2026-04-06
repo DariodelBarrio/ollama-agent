@@ -57,7 +57,9 @@ pub struct Profile {
 
 impl Default for Profile {
     fn default() -> Self {
-        let default_work_dir = dirs::document_dir()
+        let default_work_dir = std::env::current_dir()
+            .ok()
+            .or_else(dirs::document_dir)
             .unwrap_or_else(|| PathBuf::from("."))
             .to_string_lossy()
             .to_string();

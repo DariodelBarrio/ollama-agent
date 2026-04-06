@@ -64,18 +64,28 @@ class ToolRuntime:
         self,
         work_dir: str = ".",
         root_dir: Optional[str] = None,
+        project_root: Optional[str] = None,
         os_name: Optional[str] = None,
         read_only: bool = False,
     ):
         self.os_name = os_name or platform.system()
         self.work_dir = str(Path(work_dir).resolve())
-        self.root_dir = str(Path(root_dir).resolve()) if root_dir else self.work_dir
+        resolved_root = project_root or root_dir or self.work_dir
+        self.project_root = str(Path(resolved_root).resolve())
+        self.root_dir = self.project_root
         self.read_only = read_only
 
-    def set_workspace(self, work_dir: str, root_dir: Optional[str] = None) -> None:
+    def set_workspace(
+        self,
+        work_dir: str,
+        root_dir: Optional[str] = None,
+        project_root: Optional[str] = None,
+    ) -> None:
         """Actualiza el directorio actual y el límite raíz permitido."""
         self.work_dir = str(Path(work_dir).resolve())
-        self.root_dir = str(Path(root_dir).resolve()) if root_dir else self.work_dir
+        resolved_root = project_root or root_dir or self.work_dir
+        self.project_root = str(Path(resolved_root).resolve())
+        self.root_dir = self.project_root
 
     def set_mode(self, read_only: bool = False) -> None:
         self.read_only = read_only
@@ -90,7 +100,7 @@ class ToolRuntime:
 
     def resolve(self, path: str) -> Path:
         """Resuelve una ruta dentro del workspace validando escapes."""
-        return resolve_in_root(path, self.work_dir, self.root_dir)
+        return resolve_in_root(path, self.work_dir, self.project_root)
 
     def run_command(self, command: str, shell: str = "auto", timeout: int = 60) -> dict:
         """Ejecuta un comando respetando shell, timeout y sanitización."""
@@ -399,7 +409,7 @@ class ToolRuntime:
             if not resolved.exists():
                 return {"error": f"No existe: {path}"}
             # Impide borrar el workspace raíz completo de una sola llamada.
-            if str(resolved) == self.root_dir:
+            if str(resolved) == self.project_root:
                 return {"error": "No se puede eliminar el directorio raíz del workspace."}
             if resolved.is_dir():
                 shutil.rmtree(resolved)
@@ -429,7 +439,7 @@ class ToolRuntime:
             target = self.resolve(dst)
             if not source.exists():
                 return {"error": f"No existe: {src}"}
-            if str(source) == self.root_dir:
+            if str(source) == self.project_root:
                 return {"error": "No se puede mover ni renombrar el directorio raíz del workspace."}
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(source), str(target))
@@ -478,7 +488,7 @@ class ToolRuntime:
             return {"error": str(exc)}
 
     def change_directory(self, path: str) -> dict:
-        """Actualiza el `cwd` activo sin permitir salir de `root_dir`."""
+        """Actualiza el `cwd` activo sin permitir salir de `project_root`."""
         try:
             resolved = self.resolve(path)
             if not resolved.exists():

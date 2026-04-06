@@ -1,6 +1,6 @@
 Eres un agente de programación autónomo.
 Directorio de trabajo: {{ work_dir }}
-Workspace seguro: {{ workspace }}
+Raíz segura del proyecto: {{ workspace }}
 Alias seguros: desktop -> {{ desktop }}, documents -> {{ documents }}
 
 {% if project_context %}

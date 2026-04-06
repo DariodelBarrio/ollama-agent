@@ -24,6 +24,7 @@ for p in (str(ROOT), str(ROOT / "src")):
         sys.path.insert(0, p)
 
 import base_agent
+from common_runtime import generic_directory_warning
 
 
 def load_module(name: str, relative_path: str):
@@ -121,6 +122,65 @@ class PathPlaceholderResolutionTests(unittest.TestCase):
         self.assertIn("success", result)
         self.assertFalse(source.exists())
         self.assertTrue((self._tmp / "documents" / "moved.txt").exists())
+
+
+class ProjectRootSeparationTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp_root = ROOT / ".tmp-tests"
+        self._tmp_root.mkdir(exist_ok=True)
+        self._tmp = self._tmp_root / f"project-root-{uuid.uuid4().hex}"
+        (self._tmp / "docs").mkdir(parents=True)
+        (self._tmp / "src").mkdir(parents=True)
+        base_agent.sync_work_dir(str(self._tmp), project_root=str(self._tmp))
+
+    def tearDown(self):
+        base_agent.sync_work_dir(str(ROOT), project_root=str(ROOT))
+        shutil.rmtree(self._tmp_root, ignore_errors=True)
+
+    def test_project_root_stays_stable_when_work_dir_changes(self):
+        result = base_agent.change_directory("docs")
+        self.assertIn("success", result)
+        self.assertEqual(Path(base_agent.get_work_dir()), (self._tmp / "docs").resolve())
+        self.assertEqual(Path(base_agent.get_project_root()), self._tmp.resolve())
+
+    def test_alias_resolution_uses_project_root_not_mutated_work_dir(self):
+        base_agent.change_directory("docs")
+        result = base_agent.write_file("desktop/script.py", "print('desk')\n")
+        self.assertIn("success", result)
+        self.assertTrue((self._tmp / "desktop" / "script.py").exists())
+        self.assertFalse((self._tmp / "docs" / "desktop" / "script.py").exists())
+
+    def test_implicit_target_selection_inspects_project_root(self):
+        (self._tmp / "scripts").mkdir(exist_ok=True)
+        base_agent.change_directory("docs")
+        target = base_agent.build_destination_target(
+            "crea un script de ayuda",
+            str(self._tmp / "docs"),
+            str(self._tmp),
+        )
+        self.assertIsNotNone(target)
+        self.assertEqual(target.kind, "implicit")
+        self.assertEqual(target.expected_directory, (self._tmp / "scripts").resolve())
+
+    def test_verification_uses_project_root_after_change_directory(self):
+        base_agent.change_directory("docs")
+        result = base_agent.write_file("desktop/script.py", "print('ok')\n")
+        report = base_agent.verify_workspace_changes(
+            expected_paths=["desktop/script.py"],
+            changed_paths=[result["path"]],
+            before_snapshots={},
+        )
+        self.assertTrue(report.ok, report.errors)
+
+
+class GenericDirectoryWarningTests(unittest.TestCase):
+    def test_warning_for_documents_folder(self):
+        warning = generic_directory_warning(str(Path.home() / "Documents"))
+        self.assertIn("demasiado genérica", warning)
+
+    def test_no_warning_for_normal_project_folder(self):
+        warning = generic_directory_warning(str(Path.home() / "code" / "my-app"))
+        self.assertEqual(warning, "")
 
 
 # â”€â”€ Command safety â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -1244,7 +1304,7 @@ class CanonicalWritePathTests(unittest.TestCase):
         root = self._root()
         target = self._explicit_target(root, "src/utils/parser.py")
         result = base_agent.resolve_canonical_write_path(
-            "documents/desktop/parser.py", target, root
+            "documents/desktop/parser.py", target, root, root
         )
         self.assertEqual(result, str(target.expected_path))
 
@@ -1253,7 +1313,7 @@ class CanonicalWritePathTests(unittest.TestCase):
         root = self._root()
         target = self._explicit_target(root, "src/utils/parser.py")
         result = base_agent.resolve_canonical_write_path(
-            "src/utils/parser.py", target, root
+            "src/utils/parser.py", target, root, root
         )
         self.assertEqual(result, str(target.expected_path))
 
@@ -1265,7 +1325,7 @@ class CanonicalWritePathTests(unittest.TestCase):
         target = self._dir_target(root, "desktop", kind="alias")
         # Simulate model providing the correct path
         proposed = str(desktop / "script.py")
-        result = base_agent.resolve_canonical_write_path(proposed, target, root)
+        result = base_agent.resolve_canonical_write_path(proposed, target, root, root)
         self.assertEqual(Path(result).resolve(), (desktop / "script.py").resolve())
 
     def test_alias_model_uses_wrong_directory(self):
@@ -1275,7 +1335,7 @@ class CanonicalWritePathTests(unittest.TestCase):
         (Path(root) / "documents").mkdir()
         target = self._dir_target(root, "desktop", kind="alias")
         proposed = str(Path(root) / "documents" / "desktop" / "script.py")
-        result = base_agent.resolve_canonical_write_path(proposed, target, root)
+        result = base_agent.resolve_canonical_write_path(proposed, target, root, root)
         expected = str((Path(root) / "desktop" / "script.py").resolve())
         self.assertEqual(Path(result).resolve(), Path(expected).resolve())
 
@@ -1285,7 +1345,7 @@ class CanonicalWritePathTests(unittest.TestCase):
         (Path(root) / "desktop").mkdir()
         target = self._dir_target(root, "desktop", kind="alias")
         proposed = str(Path(root) / "somewhere_else" / "my_tool.py")
-        result = base_agent.resolve_canonical_write_path(proposed, target, root)
+        result = base_agent.resolve_canonical_write_path(proposed, target, root, root)
         self.assertTrue(result.endswith("my_tool.py"), result)
         self.assertIn("desktop", result)
 
@@ -1295,7 +1355,7 @@ class CanonicalWritePathTests(unittest.TestCase):
         (Path(root) / "scripts").mkdir()
         target = self._dir_target(root, "scripts", kind="implicit")
         proposed = str(Path(root) / "helper.py")
-        result = base_agent.resolve_canonical_write_path(proposed, target, root)
+        result = base_agent.resolve_canonical_write_path(proposed, target, root, root)
         self.assertIn("scripts", result)
         self.assertTrue(result.endswith("helper.py"), result)
 
@@ -1306,14 +1366,14 @@ class CanonicalWritePathTests(unittest.TestCase):
         scripts.mkdir()
         target = self._dir_target(root, "scripts", kind="implicit")
         proposed = str(scripts / "helper.py")
-        result = base_agent.resolve_canonical_write_path(proposed, target, root)
+        result = base_agent.resolve_canonical_write_path(proposed, target, root, root)
         self.assertEqual(Path(result).resolve(), (scripts / "helper.py").resolve())
 
     def test_empty_proposed_path_returns_none(self):
         """No filename in proposed → return None (caller leaves fn_args unchanged)."""
         root = self._root()
         target = self._dir_target(root, "desktop", kind="alias")
-        result = base_agent.resolve_canonical_write_path("", target, root)
+        result = base_agent.resolve_canonical_write_path("", target, root, root)
         self.assertIsNone(result)
 
     def test_function_available_in_base_agent(self):

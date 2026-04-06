@@ -27,7 +27,7 @@ from base_agent import (
     # logger
     _JsonFmt, make_logger as _make_logger,
     # tool runtime
-    sync_work_dir, get_work_dir, build_agent_tools,
+    sync_work_dir, get_work_dir, get_project_root, build_agent_tools,
     run_command, read_file, write_file, edit_file, find_files, grep,
     list_directory, delete_file, create_directory, move_file,
     search_web, fetch_url, change_directory,
@@ -216,7 +216,8 @@ class Agent:
                  read_only: bool = False,
                  guided_mode: bool = False):
         self.model        = model
-        self.work_dir     = str(Path(work_dir).resolve())
+        self.project_root = str(Path(work_dir).resolve())
+        self.work_dir     = self.project_root
         self.tag          = tag
         self.num_ctx      = num_ctx
         self.temperature  = temperature
@@ -230,10 +231,10 @@ class Agent:
         self.system_prompt_path = Path(system_prompt_path).resolve() if system_prompt_path else None
 
         # Sync shared tool runtime to this agent's work directory
-        sync_work_dir(self.work_dir, read_only=read_only)
+        sync_work_dir(self.work_dir, project_root=self.project_root, read_only=read_only)
         self.tools = build_agent_tools(include_web=True, read_only=read_only)
 
-        log_path = Path(self.work_dir) / "agent_session.jsonl"
+        log_path = Path(self.project_root) / "agent_session.jsonl"
         self.logger = _make_logger(f"agent.{id(self)}", log_path)
 
     def _build_options(self) -> dict:
@@ -463,7 +464,10 @@ class Agent:
         """Ejecuta una tool capturando excepciones en formato uniforme."""
         fn = TOOL_MAP[fn_name]
         try:
-            return fn(**fn_args)
+            result = fn(**fn_args)
+            self.work_dir = get_work_dir()
+            self.project_root = get_project_root()
+            return result
         except Exception as e:
             self.logger.error("Excepción en herramienta",
                               extra={"tool_name": fn_name, "error_details": str(e)},
@@ -570,7 +574,7 @@ class Agent:
         if not self._validate_model():
             sys.exit(1)
 
-        project_context = load_project_context(self.work_dir)
+        project_context = load_project_context(self.project_root)
 
         def _make_system_prompt() -> str:
             cfg = self.MODE_CONFIGS[self.current_mode]
@@ -601,7 +605,7 @@ class Agent:
         self.messages = [{"role": "system", "content": system_prompt}]
 
         self.logger.info("Sesión iniciada", extra={"tool_args": {
-            "model": self.model, "work_dir": self.work_dir,
+            "model": self.model, "project_root": self.project_root, "work_dir": self.work_dir,
             "tag": self.tag, "num_ctx": self.num_ctx,
             "temperature": self.temperature, "guided_mode": self.guided_mode,
         }})
@@ -649,7 +653,7 @@ class Agent:
             # ── Destination target ────────────────────────────────────────────
             # Build once per turn; propagated to guidance, verification, recovery.
             dest_target: Optional[DestinationTarget] = build_destination_target(
-                user_input, self.work_dir
+                user_input, self.work_dir, self.project_root
             )
             if dest_target:
                 guidance_messages.append({
@@ -728,7 +732,7 @@ class Agent:
                                         proposed = str(fn_args.get("path", ""))
                                         if proposed:
                                             canonical = resolve_canonical_write_path(
-                                                proposed, dest_target, self.work_dir
+                                                proposed, dest_target, self.work_dir, self.project_root
                                             )
                                             if canonical and canonical != proposed:
                                                 self.logger.debug(
@@ -938,7 +942,7 @@ def run_agent(model: str, work_dir: str, tag: str, num_ctx: int, temperature: fl
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Agente Local sobre backend OpenAI-compatible")
     parser.add_argument("--model",    default=None,  help="Modelo (omitir para menú interactivo)")
-    parser.add_argument("--dir",      default=".", help="Directorio de trabajo")
+    parser.add_argument("--dir",      default=".", help="Raíz del proyecto; también se usa como directorio de trabajo inicial")
     parser.add_argument("--tag",      default="AGENTE", help="Etiqueta visible en el header")
     parser.add_argument("--ctx",      type=int,   default=16384, help="Ventana de contexto o presupuesto de tokens del backend")
     parser.add_argument("--temp",     type=float, default=0.15, help="Temperatura 0.0-1.0")

@@ -196,7 +196,7 @@ impl App {
             Field::select("GPU", &p.gpu_profile, GPU_OPTIONS.to_vec()),
             Field::select("GPU preset", &p.gpu_preset, GPU_PRESET_OPTIONS.to_vec()),
             Field::text("Modelo", &p.model),
-            Field::path("Directorio", &p.work_dir),
+            Field::path("Project Root", &p.work_dir),
             Field::text("Tag", &p.tag),
             Field::int("Contexto", p.ctx),
             Field::float("Temperatura", p.temperature),
@@ -250,7 +250,7 @@ impl App {
                 "GPU" => self.profile.gpu_profile = f.value.clone(),
                 "GPU preset" => self.profile.gpu_preset = f.value.clone(),
                 "Modelo" => self.profile.model = f.value.clone(),
-                "Directorio" => self.profile.work_dir = f.value.clone(),
+                "Project Root" => self.profile.work_dir = f.value.clone(),
                 "Tag" => self.profile.tag = f.value.clone(),
                 "Contexto" => self.profile.ctx = f.value.parse().unwrap_or(self.profile.ctx),
                 "Temperatura" => {
@@ -614,10 +614,16 @@ impl App {
             .as_ref()
             .map(|report| report.summary_line())
             .unwrap_or_else(|| "preflight: sin ejecutar".into());
+        let project_root = resolve_path_for_display(&self.profile.work_dir, &self.repo_root);
+        let generic_warning = project_root_warning(&self.profile.work_dir, &self.repo_root)
+            .map(|warning| format!("\nwarning: {warning}"))
+            .unwrap_or_default();
         format!(
-            "{}\nworkdir: {}\nmodo: {}  guided: {}  {}",
+            "{}\nproject root: {}\nworking dir: {}{}\nmodo: {}  guided: {}  {}",
             self.session_command_preview,
+            project_root,
             self.session_work_dir_preview,
+            generic_warning,
             if self.profile.read_only {
                 "read-only"
             } else {
@@ -1347,7 +1353,7 @@ impl App {
                 "GPU" => preview.gpu_profile = f.value.clone(),
                 "GPU preset" => preview.gpu_preset = f.value.clone(),
                 "Modelo" => preview.model = f.value.clone(),
-                "Directorio" => preview.work_dir = f.value.clone(),
+                "Project Root" => preview.work_dir = f.value.clone(),
                 "Tag" => preview.tag = f.value.clone(),
                 "Contexto" => preview.ctx = f.value.parse().unwrap_or(preview.ctx),
                 "Temperatura" => {
@@ -1394,7 +1400,7 @@ impl App {
             .unwrap_or_else(|| "preflight: pendiente".into());
         self.configure_preview_detail = match preview.variant {
             Variant::Local => format!(
-                "workdir: {}  modo: {}  guided: {}  {}  {}",
+                "project root: {}  modo: {}  guided: {}  {}  {}{}",
                 resolve_path_for_display(&preview.work_dir, &self.repo_root),
                 if preview.read_only {
                     "read-only"
@@ -1403,11 +1409,15 @@ impl App {
                 },
                 if preview.guided_mode { "on" } else { "off" },
                 preflight_summary,
-                gpu_recommendation_summary_for(&preview)
+                gpu_recommendation_summary_for(&preview),
+                project_root_warning(&preview.work_dir, &self.repo_root)
+                    .map(|warning| format!("\nwarning: {warning}"))
+                    .unwrap_or_default()
             ),
             Variant::Hybrid => {
                 format!(
-                "backend: {}  cloud: {}  key: {}  critic: {}  sandbox: {}  modo: {}  guided: {}  {}  {}",
+                "project root: {}\nbackend: {}  cloud: {}  key: {}  critic: {}  sandbox: {}  modo: {}  guided: {}  {}  {}{}",
+                resolve_path_for_display(&preview.work_dir, &self.repo_root),
                 preview.backend,
                 hybrid_cloud_summary(&preview),
                 if preview.remote_api_key.trim().is_empty() { "env/off" } else { "inline" },
@@ -1416,7 +1426,10 @@ impl App {
                 if preview.read_only { "read-only" } else { "read-write" },
                 if preview.guided_mode { "on" } else { "off" },
                 preflight_summary,
-                gpu_recommendation_summary_for(&preview)
+                gpu_recommendation_summary_for(&preview),
+                project_root_warning(&preview.work_dir, &self.repo_root)
+                    .map(|warning| format!("\nwarning: {warning}"))
+                    .unwrap_or_default()
             )
             }
         };
@@ -1704,6 +1717,39 @@ fn resolve_path_for_display(path: &str, repo_root: &Path) -> String {
     resolved.to_string_lossy().to_string()
 }
 
+fn project_root_warning(path: &str, repo_root: &Path) -> Option<String> {
+    let resolved = PathBuf::from(resolve_path_for_display(path, repo_root));
+    let home = dirs::home_dir();
+    let generic_names = [
+        "documents",
+        "documentos",
+        "desktop",
+        "escritorio",
+        "downloads",
+        "descargas",
+        "onedrive",
+        "dropbox",
+        "icloud drive",
+        "my documents",
+        "mis documentos",
+    ];
+    let is_generic = home
+        .as_ref()
+        .map(|candidate| candidate == &resolved)
+        .unwrap_or(false)
+        || generic_names
+            .iter()
+            .any(|name| resolved.file_name().map(|part| part.to_string_lossy().eq_ignore_ascii_case(name)).unwrap_or(false));
+    if is_generic {
+        Some(
+            "esta carpeta parece demasiado genérica; usa la raíz real de un proyecto para mejores resultados"
+                .into(),
+        )
+    } else {
+        None
+    }
+}
+
 fn rect_contains(area: Rect, x: u16, y: u16) -> bool {
     x >= area.x
         && x < area.x.saturating_add(area.width)
@@ -1715,10 +1761,10 @@ fn rect_contains(area: Rect, x: u16, y: u16) -> bool {
 mod tests {
     use super::{
         cloud_model_options, cloud_preset_value, cloud_provider_defaults, gpu_recommendation,
-        resolve_path_for_display, visible_window_bounds,
+        project_root_warning, resolve_path_for_display, visible_window_bounds,
     };
     use crate::config::Variant;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn gpu_recommendation_5060_safe_is_conservative() {
@@ -1738,6 +1784,20 @@ mod tests {
     fn resolve_relative_work_dir_for_preview() {
         let repo = Path::new("/repo");
         assert_eq!(resolve_path_for_display(".", repo), "/repo");
+    }
+
+    #[test]
+    fn generic_project_root_warning_flags_documents_folder() {
+        let repo = Path::new("/repo");
+        let warning = project_root_warning("/Users/dev/Documents", repo);
+        assert!(warning.is_some());
+    }
+
+    #[test]
+    fn generic_project_root_warning_ignores_normal_repo_folder() {
+        let repo = PathBuf::from("/workspace");
+        let warning = project_root_warning("/workspace/my-app", &repo);
+        assert!(warning.is_none());
     }
 
     #[test]

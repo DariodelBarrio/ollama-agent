@@ -135,6 +135,42 @@ def normalize_workspace_path(path: str, root_dir: str) -> str:
     return raw
 
 
+_GENERIC_DIR_NAMES: frozenset[str] = frozenset({
+    "documents", "documentos", "desktop", "escritorio",
+    "downloads", "descargas", "onedrive", "dropbox",
+    "my documents", "mis documentos", "icloud drive",
+})
+
+
+def is_generic_directory(path: str) -> bool:
+    """Return True if the path looks too generic to be a meaningful project root.
+
+    Generic means: the user's home directory, or a well-known personal folder
+    (Documents, Desktop, Downloads, etc.) that is not itself a project.
+    This is used to show a UX warning, never to block anything.
+    """
+    try:
+        p = Path(path).resolve()
+    except Exception:
+        return False
+    try:
+        if p == Path.home().resolve():
+            return True
+    except Exception:
+        pass
+    return p.name.lower() in _GENERIC_DIR_NAMES
+
+
+def generic_directory_warning(path: str) -> str:
+    """Return a UX warning when the chosen project root looks too generic."""
+    if not is_generic_directory(path):
+        return ""
+    return (
+        "Esta carpeta parece demasiado genérica; usa la raíz real de un proyecto "
+        "para mejores resultados."
+    )
+
+
 def is_within_root(path: Path, root_dir: str) -> bool:
     """Comprueba que una ruta resuelta no escape del workspace permitido."""
     try:

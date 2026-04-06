@@ -9,8 +9,8 @@ Los templates usan Jinja2. Variables disponibles según variante:
 
 | Variable | Descripción | Local | Hybrid |
 |---|---|---|---|
-| `{{ work_dir }}` | Directorio de trabajo actual | Sí | Sí |
-| `{{ workspace }}` | Raíz segura del workspace actual | Sí | Sí |
+| `{{ work_dir }}` | Directorio de trabajo actual (mutable durante la sesión) | Sí | Sí |
+| `{{ workspace }}` | Raíz segura del proyecto/workspace (estable durante la sesión) | Sí | Sí |
 | `{{ project_context }}` | Contenido de CLAUDE.md / README.md / .cursorrules | Sí | Sí |
 | `{{ mode_section }}` | Sección del modo activo (`code`, `architect`, `research`) | Sí | No |
 | `{{ desktop }}` | Ruta segura `workspace/desktop` | Sí | Sí |
